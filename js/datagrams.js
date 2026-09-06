@@ -156,13 +156,33 @@ export class WebTransportDatagramDuplexStream {
           native = await session;
         } catch {
           // The session never connected. Its own promises report why, so the
-          // datagram stream just ends.
-          controller.close();
+          // datagram stream just ends. Guarded because the consumer may have
+          // cancelled it while the handshake was still running, which closes
+          // the stream and makes a second close throw.
+          try {
+            controller.close();
+          } catch {
+            // Already closed, which is where this was heading regardless.
+          }
           return;
         }
+        // The pump can deliver its terminating empty batch after the stream
+        // has already ended: a cancelled reader, or a session that closes
+        // while a batch is in flight, both close the stream from this side
+        // first. Closing twice throws, and this runs in a threadsafe callback
+        // with no caller to catch it, so it has to be idempotent here.
+        let ended = false;
         native.startDatagramPump((packed) => {
+          if (ended) return;
           if (packed.byteLength === 0) {
-            controller.close();
+            ended = true;
+            // Still guarded: the consumer may have cancelled the stream,
+            // which closes it without going through this callback.
+            try {
+              controller.close();
+            } catch {
+              // Already closed, which is the outcome this wanted anyway.
+            }
             return;
           }
           const view = new DataView(packed.buffer, packed.byteOffset, packed.byteLength);
@@ -176,7 +196,16 @@ export class WebTransportDatagramDuplexStream {
               length += (byte & 0x7f) * 2 ** shift;
               shift += 7;
             } while (byte & 0x80);
-            enqueueDatagram(controller, packed.subarray(offset, offset + length));
+            try {
+              enqueueDatagram(controller, packed.subarray(offset, offset + length));
+            } catch {
+              // The consumer cancelled while this batch was in flight. The
+              // rest of the batch has nowhere to go, so drop it: datagrams
+              // are unreliable, and losing them on a cancelled stream is
+              // exactly what that means.
+              ended = true;
+              return;
+            }
             offset += length;
           }
         });

@@ -56,6 +56,41 @@ async function nextSession(): Promise<any> {
   return accepted.shift();
 }
 
+describe("datagram stream teardown", () => {
+  test("a cancelled reader does not throw when the session then closes", async () => {
+    const wt = new WebTransport(url(), options());
+    await wt.ready;
+    await nextSession();
+
+    // Cancelling closes the readable from this side. The pump still has its
+    // terminating batch to deliver, and closing an already-closed stream
+    // throws from inside a threadsafe callback, where nothing can catch it:
+    // it surfaced as an unhandled error rather than a test failure.
+    await wt.datagrams.readable.cancel();
+
+    wt.close({ closeCode: 0, reason: "" });
+    await wt.closed;
+
+    // Give the pump's terminating batch time to arrive after the close.
+    await Bun.sleep(50);
+    expect(true).toBe(true);
+  });
+
+  test("closing twice over does not throw", async () => {
+    const wt = new WebTransport(url(), options());
+    await wt.ready;
+    await nextSession();
+
+    wt.close({ closeCode: 0, reason: "" });
+    await wt.closed;
+    await Bun.sleep(30);
+    // A second close is a no-op per spec, and must not disturb the pump.
+    wt.close({ closeCode: 0, reason: "" });
+    await Bun.sleep(30);
+    expect(true).toBe(true);
+  });
+});
+
 describe("WebTransport constructor", () => {
   test("rejects a non-https scheme synchronously", () => {
     expect(() => new WebTransport("http://example.com/")).toThrow(DOMException);

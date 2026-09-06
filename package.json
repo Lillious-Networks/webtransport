@@ -1,19 +1,37 @@
 {
   "name": "@lillious-networks/webtransport-bun",
   "version": "0.1.0",
-  "description": "W3C WebTransport for Bun, backed by a Rust QUIC/HTTP-3 stack",
-  "type": "module",
-  "main": "js/index.js",
-  "types": "js/index.d.ts",
-  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Lillious-Networks/WebTransport.git"
   },
-  "homepage": "https://github.com/Lillious-Networks/WebTransport#readme",
+  "main": "js/index.js",
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0",
+    "@types/bun": "latest",
+    "husky": "^9.1.7",
+    "typescript": "^5"
+  },
+  "exports": {
+    ".": {
+      "types": "./js/index.d.ts",
+      "bun": "./js/index.js",
+      "default": "./js/index.js"
+    }
+  },
   "bugs": {
     "url": "https://github.com/Lillious-Networks/WebTransport/issues"
   },
+  "description": "W3C WebTransport for Bun, backed by a Rust QUIC/HTTP-3 stack",
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "files": [
+    "js/",
+    "wt.*.node",
+    "npm/"
+  ],
+  "homepage": "https://github.com/Lillious-Networks/WebTransport#readme",
   "keywords": [
     "webtransport",
     "bun",
@@ -23,21 +41,7 @@
     "datagrams",
     "realtime"
   ],
-  "exports": {
-    ".": {
-      "types": "./js/index.d.ts",
-      "bun": "./js/index.js",
-      "default": "./js/index.js"
-    }
-  },
-  "files": [
-    "js/",
-    "wt.*.node",
-    "npm/"
-  ],
-  "engines": {
-    "bun": ">=1.4.0"
-  },
+  "license": "MIT",
   "napi": {
     "binaryName": "wt",
     "targets": [
@@ -56,11 +60,9 @@
     "test:rust": "cargo test --workspace",
     "typecheck": "tsc --noEmit",
     "bench": "bun run bench/datagrams.ts",
-    "wpt": "bun wpt/run.ts"
+    "wpt": "bun wpt/run.ts",
+    "prepare": "husky"
   },
-  "devDependencies": {
-    "@napi-rs/cli": "^3.0.0",
-    "@types/bun": "latest",
-    "typescript": "^5"
-  }
+  "type": "module",
+  "types": "js/index.d.ts"
 }
