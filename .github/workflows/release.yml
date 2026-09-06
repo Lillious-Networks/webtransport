@@ -1,0 +1,186 @@
+# Release: build native prebuilds for every supported target, attach them to a
+# GitHub Release, and publish to npm.
+#
+# Triggered by pushing a v* tag. Publishing is irreversible (npm permanently
+# reserves a version number even after an unpublish), so the job verifies that
+# the tag matches package.json and that the version is not already published
+# before it uploads anything.
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.4.0). Created from the current ref if absent."
+        required: true
+        type: string
+
+jobs:
+  # Gate the expensive matrix on the cheap checks: a version mistake should
+  # fail in seconds, not after six cross-platform builds.
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "${TAG}" != "v${VERSION}" ]; then
+            echo "::error::Tag ${TAG} does not match package.json version ${VERSION} (expected v${VERSION})."
+            exit 1
+          fi
+          NAME="$(node -p "require('./package.json').name")"
+          if npm view "${NAME}@${VERSION}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "::error::${NAME}@${VERSION} is already published. npm versions cannot be reused."
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [verify]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            triple: linux-x64-gnu
+            rust_target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            triple: linux-arm64-gnu
+            rust_target: aarch64-unknown-linux-gnu
+          - os: ubuntu-latest
+            triple: linux-x64-musl
+            rust_target: x86_64-unknown-linux-musl
+          - os: macos-latest
+            triple: darwin-arm64
+            rust_target: aarch64-apple-darwin
+          - os: macos-latest
+            triple: darwin-x64
+            rust_target: x86_64-apple-darwin
+          - os: windows-latest
+            triple: win32-x64-msvc
+            rust_target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.triple }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.1"
+      - name: Install dependencies
+        run: bun install
+      # aws-lc-rs needs a cross toolchain and an explicit linker for the
+      # targets that are not the runner's own.
+      - name: Install cross toolchain (linux-arm64)
+        if: matrix.triple == 'linux-arm64-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
+      - name: Install cross toolchain (linux-musl)
+        if: matrix.triple == 'linux-x64-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build addon
+        run: |
+          bunx @napi-rs/cli build \
+            --platform --release \
+            --manifest-path crates/wt-napi/Cargo.toml \
+            --target ${{ matrix.rust_target }}
+      # The loader looks for wt.<triple>.node at the package root, so name the
+      # artifact exactly that rather than relying on napi's own suffix.
+      - name: Stage prebuild
+        run: |
+          set -euo pipefail
+          mkdir -p prebuilds
+          SRC="$(find . -maxdepth 2 -name 'wt*.node' -not -path './prebuilds/*' | head -1)"
+          if [ -z "${SRC}" ]; then
+            echo "::error::No .node artifact was produced for ${{ matrix.triple }}."
+            exit 1
+          fi
+          cp "${SRC}" "prebuilds/wt.${{ matrix.triple }}.node"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuild-${{ matrix.triple }}
+          path: prebuilds/*.node
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: prebuild-*
+          path: staging
+          merge-multiple: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.1"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+      - name: Collect prebuilds
+        run: |
+          set -euo pipefail
+          cp staging/*.node .
+          ls -la wt.*.node
+          # All six targets must be present: a partial publish leaves users on
+          # the missing platform with an install that cannot load.
+          COUNT="$(ls wt.*.node | wc -l)"
+          if [ "${COUNT}" -ne 6 ]; then
+            echo "::error::Expected 6 prebuilds, found ${COUNT}."
+            exit 1
+          fi
+          sha256sum wt.*.node > SHA256SUMS
+      - name: Verify tarball contents
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --ignore-scripts 2>&1 | tee pack.txt
+          grep -q "js/index.js" pack.txt || { echo "::error::js/ missing from tarball"; exit 1; }
+          grep -q "wt.linux-x64-gnu.node" pack.txt || { echo "::error::prebuilds missing from tarball"; exit 1; }
+      - name: Publish to npm
+        run: npm publish --ignore-scripts --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify.outputs.tag }}
+          files: |
+            wt.*.node
+            SHA256SUMS
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

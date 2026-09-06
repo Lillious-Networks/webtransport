@@ -1,0 +1,25 @@
+[package]
+name = "wt-napi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "napi-rs bindings exposing WebTransport to Bun."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wt-core = { path = "../wt-core" }
+wt-proto = { path = "../wt-proto" }
+bytes.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+rcgen = "0.14"
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"

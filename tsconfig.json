@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    "strict": true,
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["js/**/*.d.ts", "examples/**/*.ts", "bench/**/*.ts", "src/**/*.ts"],
+  "exclude": ["node_modules", "target"]
+}

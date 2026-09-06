@@ -1,0 +1,66 @@
+{
+  "name": "@lillious-networks/webtransport-bun",
+  "version": "0.1.0",
+  "description": "W3C WebTransport for Bun, backed by a Rust QUIC/HTTP-3 stack",
+  "type": "module",
+  "main": "js/index.js",
+  "types": "js/index.d.ts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lillious-Networks/WebTransport.git"
+  },
+  "homepage": "https://github.com/Lillious-Networks/WebTransport#readme",
+  "bugs": {
+    "url": "https://github.com/Lillious-Networks/WebTransport/issues"
+  },
+  "keywords": [
+    "webtransport",
+    "bun",
+    "quic",
+    "http3",
+    "napi-rs",
+    "datagrams",
+    "realtime"
+  ],
+  "exports": {
+    ".": {
+      "types": "./js/index.d.ts",
+      "bun": "./js/index.js",
+      "default": "./js/index.js"
+    }
+  },
+  "files": [
+    "js/",
+    "wt.*.node",
+    "npm/"
+  ],
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "napi": {
+    "binaryName": "wt",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release --manifest-path crates/wt-napi/Cargo.toml",
+    "build:debug": "napi build --platform --manifest-path crates/wt-napi/Cargo.toml",
+    "test": "bun test",
+    "test:rust": "cargo test --workspace",
+    "typecheck": "tsc --noEmit",
+    "bench": "bun run bench/datagrams.ts",
+    "wpt": "bun wpt/run.ts"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0",
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}

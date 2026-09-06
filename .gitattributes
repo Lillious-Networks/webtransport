@@ -1,0 +1,4 @@
+# Normalise to LF in the repository. CI runs bash on Linux and macOS, where
+# CRLF in a checked-out script is a syntax error.
+* text=auto eol=lf
+*.node binary

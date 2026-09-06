@@ -1,0 +1,70 @@
+# CI: lint, type-check, and run both test suites on every push and PR.
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: cargo test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --all --check
+      # Warnings are failures: the workspace is warning-clean, and letting one
+      # land makes the next one invisible.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --release
+
+  bun:
+    name: bun test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.1"
+      - name: Install dependencies
+        run: bun install
+      # The JS suite exercises the real addon, so it has to be built first.
+      - name: Build native addon
+        run: bun run build
+      - name: Type-check
+        run: bun run typecheck
+      - name: Tests
+        run: bun test
+      # The upstream WPT WebTransport suite, which is a real gate: a
+      # regression here fails the build. The tests are fetched from
+      # web-platform-tests, so an unreachable upstream is reported as a skip
+      # rather than counted as a failure (see the runner's fetch handling).
+      - name: Web Platform Tests
+        run: bun run wpt

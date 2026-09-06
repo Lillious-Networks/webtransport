@@ -1,0 +1,12 @@
+# Ship the built package only: sources, tests, and CI stay in git.
+crates/
+target/
+bench/
+examples/
+.github/
+src/
+Cargo.toml
+Cargo.lock
+tsconfig.json
+*.log
+wpt/
