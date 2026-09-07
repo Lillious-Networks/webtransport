@@ -87,7 +87,7 @@ jobs:
           key: ${{ matrix.triple }}
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.1"
+          bun-version: "canary"
       - name: Install dependencies
         run: bun install
       # aws-lc-rs needs a cross toolchain and an explicit linker for the
@@ -146,7 +146,7 @@ jobs:
           merge-multiple: true
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.1"
+          bun-version: "canary"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
