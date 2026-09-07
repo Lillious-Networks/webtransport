@@ -1,8 +1,11 @@
 # CI: lint, type-check, and run both test suites on every push and PR.
+# A push that only bumps package.json is skipped; the tag workflow turns it
+# into a release instead.
 name: test
 on:
   push:
     branches: [main]
+    paths-ignore: ["package.json"]
   pull_request:
   workflow_dispatch:
 

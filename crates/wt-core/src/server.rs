@@ -239,13 +239,16 @@ async fn serve_connection(
             // No SETTINGS means no usable HTTP/3 connection.
             _ => return Err(Error::Protocol("the client never sent its SETTINGS".into())),
         };
-    // Only WT_MAX_SESSIONS is checked: SETTINGS_ENABLE_CONNECT_PROTOCOL is a
-    // server-to-client signal (RFC 9220), so a conforming client does not send
-    // it and requiring it here would reject every browser.
-    if client_settings.wt_max_sessions == 0 {
-        quic.close(0u32.into(), b"client does not support webtransport");
+    // Only H3_DATAGRAM is checked, matching quic-go's server: SETTINGS_ENABLE_
+    // CONNECT_PROTOCOL is a server-to-client signal (RFC 9220), so a
+    // conforming client does not send it and requiring it here would reject
+    // every browser. The WebTransport support indicators are not checked
+    // either, since final-spec clients may send none of them, and the draft
+    // only has us wait for the client's SETTINGS to arrive (§3.1).
+    if !client_settings.h3_datagram {
+        quic.close(0u32.into(), b"client does not support http datagrams");
         return Err(Error::Protocol(format!(
-            "client SETTINGS lack WebTransport support: {client_settings:?}"
+            "client SETTINGS lack datagram support: {client_settings:?}"
         )));
     }
 

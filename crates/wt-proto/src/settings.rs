@@ -1,17 +1,20 @@
 //! HTTP/3 SETTINGS relevant to WebTransport (draft §3.1, §5.5).
 //!
-//! Both peers advertise support by sending `SETTINGS_WEBTRANSPORT_MAX_SESSIONS`
-//! with a non-zero value; a server must additionally send
+//! Both peers advertise support by sending `SETTINGS_WT_MAX_SESSIONS` with a
+//! non-zero value; a server must additionally send
 //! `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1` (RFC 9220). A client must not open a
 //! session before it has seen the server's SETTINGS, since only then does it
 //! know WebTransport is available.
 //!
 //! The setting's codepoint changed across drafts, and each codepoint doubles
-//! as version negotiation: an endpoint reading a spelling it does not know
-//! concludes the peer does not speak its draft. We advertise the two
-//! spellings that together cover every shipped browser (draft-07 for Chromium
-//! and Safari, draft-02 for Chromium and Firefox) and recognise the draft-13
-//! spelling when parsing so peers on it are still accepted.
+//! as version negotiation. We advertise the set that quic-go ships and that
+//! Safari's iOS path accepts: draft-02 (Chromium, Firefox), the final
+//! `SETTINGS_WT_ENABLED`, and the draft-13 `SETTINGS_WT_MAX_SESSIONS`
+//! accompanied by all three `WT_INITIAL_MAX_*` limits — Safari switches
+//! session-level flow control on when the session limit exceeds 1, and with
+//! those three absent it reads zero credit and refuses the session before
+//! CONNECT. The draft-07 spelling is still recognised when parsing so older
+//! clients (Chromium, Safari 26.x on macOS) are accepted.
 
 /// RFC 9204: the dynamic table capacity we permit a peer to use.
 ///
@@ -28,12 +31,16 @@ pub const ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
 pub const H3_DATAGRAM: u64 = 0x33;
 /// draft-07 spelling of `SETTINGS_WEBTRANSPORT_MAX_SESSIONS`.
 ///
-/// The codepoint most shipped clients understand: Chromium's draft-07 client
-/// (still what Chrome sends today), Safari 26.x — which refuses to establish
-/// a session against a server that does not send it non-zero — and the
-/// wtransport server. This is the spelling we advertise, carrying the real
-/// session limit.
+/// Recognised when parsing so older peers (Chromium's draft-07 client and
+/// Safari 26.x on macOS, which refuses servers that do not send it non-zero)
+/// are accepted, but no longer advertised: the quic-go set below is what
+/// Safari's iOS path reads.
 pub const WT_MAX_SESSIONS_DRAFT07: u64 = 0xc671_706a;
+/// Final spelling of the support indicator, `SETTINGS_WT_ENABLED`.
+///
+/// Draft-13 and later use this codepoint instead of a session limit; a value
+/// of 1 is the only valid one. quic-go clients require a server to send it.
+pub const WT_ENABLED: u64 = 0x2c7c_f000;
 /// The draft-02 spelling of the same setting.
 ///
 /// Accepted when parsing a peer's SETTINGS so we can talk to endpoints on an
@@ -43,12 +50,12 @@ pub const WT_MAX_SESSIONS_DRAFT07: u64 = 0xc671_706a;
 /// Omitting it makes draft-02-only Chromium — and Firefox, whose Neqo knows no
 /// other codepoint — conclude WebTransport is unsupported.
 pub const WT_MAX_SESSIONS_DRAFT02: u64 = 0x2b60_3742;
-/// draft-13 spelling of the same setting (`SETTINGS_WT_MAX_SESSIONS`).
+/// draft-13 spelling of `SETTINGS_WT_MAX_SESSIONS`.
 ///
-/// Recognised when parsing so peers on that draft are still accepted, but
-/// never advertised: no shipped browser implements it, Safari 26.x fails the
-/// handshake when it appears next to the draft-07 codepoint, and later draft
-/// revisions removed the setting entirely.
+/// The codepoint Safari's iOS path requires at a value of at least 1; when it
+/// exceeds 1 Safari also enables session-level flow control, so the three
+/// `WT_INITIAL_MAX_*` settings must be advertised alongside it or the session
+/// is refused before CONNECT.
 pub const WT_MAX_SESSIONS_DRAFT13: u64 = 0x14e9_cd29;
 /// draft §9.2: initial session-level flow-control limit.
 pub const WT_INITIAL_MAX_DATA: u64 = 0x2b61;
@@ -62,6 +69,9 @@ pub const WT_INITIAL_MAX_STREAMS_BIDI: u64 = 0x2b65;
 pub struct Settings {
     pub enable_connect_protocol: bool,
     pub h3_datagram: bool,
+    /// The final `SETTINGS_WT_ENABLED` flag: draft-13+ peers send this rather
+    /// than a session limit.
+    pub wt_enabled: bool,
     pub wt_max_sessions: u64,
     pub wt_initial_max_data: u64,
     pub wt_initial_max_streams_uni: u64,
@@ -80,7 +90,16 @@ impl Settings {
         Self {
             enable_connect_protocol: true,
             h3_datagram: true,
+            wt_enabled: true,
             wt_max_sessions: max_sessions,
+            // Safari enables session-level flow control whenever the session
+            // limit exceeds 1 and reads these as the opening credit; leaving
+            // them zero makes it refuse the session before CONNECT. The
+            // values mirror quic-go's, which is what Safari's iOS path was
+            // tested against.
+            wt_initial_max_data: 1 << 60,
+            wt_initial_max_streams_uni: 1 << 60,
+            wt_initial_max_streams_bidi: 1 << 60,
             // Explicitly zero: the decoder resolves no dynamic references, so
             // a peer must not make any.
             qpack_max_table_capacity: 0,
@@ -94,6 +113,7 @@ impl Settings {
         match id {
             ENABLE_CONNECT_PROTOCOL => self.enable_connect_protocol = value == 1,
             H3_DATAGRAM => self.h3_datagram = value == 1,
+            WT_ENABLED => self.wt_enabled = value == 1,
             WT_MAX_SESSIONS_DRAFT02 | WT_MAX_SESSIONS_DRAFT07 | WT_MAX_SESSIONS_DRAFT13 => {
                 // Either spelling means the same thing; take the larger so a
                 // peer sending several is not read as offering fewer sessions.
@@ -114,9 +134,10 @@ impl Settings {
     /// these settings?
     ///
     /// Extended CONNECT alone is not enough: without a non-zero session limit
-    /// the server is telling us it will accept none.
+    /// — or, for draft-13+ peers, the `WT_ENABLED` flag — the server is
+    /// telling us it will accept none.
     pub fn accepts_webtransport(&self) -> bool {
-        self.enable_connect_protocol && self.wt_max_sessions > 0
+        self.enable_connect_protocol && (self.wt_max_sessions > 0 || self.wt_enabled)
     }
 
     /// Are datagrams usable on this connection? Drives `reliability`:
@@ -180,6 +201,17 @@ mod tests {
         assert_eq!(s.wt_max_sessions, 4);
     }
 
+    /// Draft-13+ peers signal support with SETTINGS_WT_ENABLED instead of a
+    /// session limit; a session limit of zero must not read as "no support".
+    #[test]
+    fn wt_enabled_flag_alone_is_support() {
+        let mut s = Settings::default();
+        s.apply(ENABLE_CONNECT_PROTOCOL, 1);
+        s.apply(WT_ENABLED, 1);
+        assert_eq!(s.wt_max_sessions, 0);
+        assert!(s.accepts_webtransport());
+    }
+
     /// Datagram support is independent of session support and decides the
     /// reliability mode reported to JS.
     #[test]
@@ -225,6 +257,13 @@ mod tests {
         let s = Settings::advertised(16);
         assert!(s.accepts_webtransport());
         assert!(s.supports_datagrams());
+        assert!(s.wt_enabled);
         assert_eq!(s.wt_max_sessions, 16);
+        // Safari refuses sessions when the session limit exceeds 1 but these
+        // initial flow-control credits are absent, so the advertised set must
+        // always carry them.
+        assert!(s.wt_initial_max_data > 0);
+        assert!(s.wt_initial_max_streams_uni > 0);
+        assert!(s.wt_initial_max_streams_bidi > 0);
     }
 }

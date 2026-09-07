@@ -1,0 +1,51 @@
+# Version tag: when a push to main bumps the package.json version, tag the
+# commit v<version> and dispatch the release workflow for that tag. Commits
+# that change package.json without bumping the version do nothing, so merging
+# a PR that only edits scripts cannot publish.
+#
+# The tag is created through the refs API rather than a git push so that no
+# push event fires twice, and the release is started explicitly with a
+# workflow_dispatch, which GITHUB_TOKEN is allowed to trigger.
+name: tag
+on:
+  push:
+    branches: [main]
+    paths: ["package.json"]
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: resolve
+        run: |
+          set -euo pipefail
+          NEW="$(node -p "require('./package.json').version")"
+          OLD="$(git show "HEAD^:package.json" 2>/dev/null \
+            | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || true)"
+          if [ "${OLD}" = "${NEW}" ]; then
+            echo "package.json changed but the version was not bumped; no tag."
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "bump=true" >> "$GITHUB_OUTPUT"
+          echo "tag=v${NEW}" >> "$GITHUB_OUTPUT"
+      - name: Tag the bump commit and start the release
+        if: steps.resolve.outputs.bump == 'true'
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists; nothing to do."
+            exit 0
+          fi
+          gh api --method POST "repos/${{ github.repository }}/git/refs" \
+            -f "ref=refs/tags/${TAG}" -f "sha=${{ github.sha }}"
+          gh workflow run release.yml -f "tag=${TAG}"
+          echo "Created ${TAG} and dispatched the release workflow."
