@@ -1,10 +1,17 @@
 //! HTTP/3 SETTINGS relevant to WebTransport (draft §3.1, §5.5).
 //!
-//! Both peers advertise support by sending `SETTINGS_WT_MAX_SESSIONS` with a
-//! non-zero value; a server must additionally send
+//! Both peers advertise support by sending `SETTINGS_WEBTRANSPORT_MAX_SESSIONS`
+//! with a non-zero value; a server must additionally send
 //! `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1` (RFC 9220). A client must not open a
 //! session before it has seen the server's SETTINGS, since only then does it
 //! know WebTransport is available.
+//!
+//! The setting's codepoint changed across drafts, and each codepoint doubles
+//! as version negotiation: an endpoint reading a spelling it does not know
+//! concludes the peer does not speak its draft. We advertise the two
+//! spellings that together cover every shipped browser (draft-07 for Chromium
+//! and Safari, draft-02 for Chromium and Firefox) and recognise the draft-13
+//! spelling when parsing so peers on it are still accepted.
 
 /// RFC 9204: the dynamic table capacity we permit a peer to use.
 ///
@@ -19,22 +26,30 @@ pub const QPACK_BLOCKED_STREAMS: u64 = 0x07;
 pub const ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
 /// RFC 9297: enables HTTP/3 datagrams.
 pub const H3_DATAGRAM: u64 = 0x33;
-/// draft §9.2: number of concurrent WebTransport sessions the peer will accept.
+/// draft-07 spelling of `SETTINGS_WEBTRANSPORT_MAX_SESSIONS`.
 ///
-/// This codepoint *is* the version negotiation (draft §7.1): a peer using a
-/// different draft uses a different value, so an endpoint reading the wrong one
-/// concludes the peer does not support WebTransport at all rather than
-/// reporting a version mismatch.
-pub const WT_MAX_SESSIONS: u64 = 0x14e9_cd29;
+/// The codepoint most shipped clients understand: Chromium's draft-07 client
+/// (still what Chrome sends today), Safari 26.x — which refuses to establish
+/// a session against a server that does not send it non-zero — and the
+/// wtransport server. This is the spelling we advertise, carrying the real
+/// session limit.
+pub const WT_MAX_SESSIONS_DRAFT07: u64 = 0xc671_706a;
 /// The draft-02 spelling of the same setting.
 ///
 /// Accepted when parsing a peer's SETTINGS so we can talk to endpoints on an
-/// old draft, and advertised alongside the current codepoint with the value 1:
-/// quiche treats this codepoint as a boolean enable flag ("SETTINGS_WEBTRANS_
-/// DRAFT00"), rejecting any value above 1 with H3_SETTINGS_ERROR, and matches
-/// peers by version intersection: omitting it makes a draft-02-only Chromium
-/// conclude WebTransport is unsupported.
+/// old draft, and advertised with the value 1: quiche treats this codepoint as
+/// a boolean enable flag ("SETTINGS_ENABLE_WEBTRANSPORT"), rejecting any value
+/// above 1 with H3_SETTINGS_ERROR, and matches peers by version intersection.
+/// Omitting it makes draft-02-only Chromium — and Firefox, whose Neqo knows no
+/// other codepoint — conclude WebTransport is unsupported.
 pub const WT_MAX_SESSIONS_DRAFT02: u64 = 0x2b60_3742;
+/// draft-13 spelling of the same setting (`SETTINGS_WT_MAX_SESSIONS`).
+///
+/// Recognised when parsing so peers on that draft are still accepted, but
+/// never advertised: no shipped browser implements it, Safari 26.x fails the
+/// handshake when it appears next to the draft-07 codepoint, and later draft
+/// revisions removed the setting entirely.
+pub const WT_MAX_SESSIONS_DRAFT13: u64 = 0x14e9_cd29;
 /// draft §9.2: initial session-level flow-control limit.
 pub const WT_INITIAL_MAX_DATA: u64 = 0x2b61;
 /// draft §9.2: initial limit on incoming unidirectional streams.
@@ -79,9 +94,9 @@ impl Settings {
         match id {
             ENABLE_CONNECT_PROTOCOL => self.enable_connect_protocol = value == 1,
             H3_DATAGRAM => self.h3_datagram = value == 1,
-            WT_MAX_SESSIONS | WT_MAX_SESSIONS_DRAFT02 => {
+            WT_MAX_SESSIONS_DRAFT02 | WT_MAX_SESSIONS_DRAFT07 | WT_MAX_SESSIONS_DRAFT13 => {
                 // Either spelling means the same thing; take the larger so a
-                // peer sending both is not read as offering fewer sessions.
+                // peer sending several is not read as offering fewer sessions.
                 self.wt_max_sessions = self.wt_max_sessions.max(value);
             }
             WT_INITIAL_MAX_DATA => self.wt_initial_max_data = value,
@@ -119,7 +134,7 @@ mod tests {
         let mut s = Settings::default();
         s.apply(ENABLE_CONNECT_PROTOCOL, 1);
         s.apply(H3_DATAGRAM, 1);
-        s.apply(WT_MAX_SESSIONS, 1);
+        s.apply(WT_MAX_SESSIONS_DRAFT07, 1);
         s
     }
 
@@ -150,8 +165,19 @@ mod tests {
     #[test]
     fn max_sessions_alone_is_not_enough() {
         let mut s = Settings::default();
-        s.apply(WT_MAX_SESSIONS, 4);
+        s.apply(WT_MAX_SESSIONS_DRAFT07, 4);
         assert!(!s.accepts_webtransport(), "extended CONNECT is required");
+    }
+
+    /// Every draft spelling of the session limit is recognised, and the
+    /// largest value wins when a peer sends more than one.
+    #[test]
+    fn every_max_sessions_spelling_is_recognised() {
+        let mut s = Settings::default();
+        s.apply(WT_MAX_SESSIONS_DRAFT02, 1);
+        s.apply(WT_MAX_SESSIONS_DRAFT07, 4);
+        s.apply(WT_MAX_SESSIONS_DRAFT13, 2);
+        assert_eq!(s.wt_max_sessions, 4);
     }
 
     /// Datagram support is independent of session support and decides the

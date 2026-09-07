@@ -80,16 +80,25 @@ impl Frame {
                     put(settings::H3_DATAGRAM, 1)?;
                 }
                 if s.wt_max_sessions > 0 {
-                    // The current codepoint carries the real session limit.
-                    put(settings::WT_MAX_SESSIONS, s.wt_max_sessions)?;
+                    // The draft-07 codepoint carries the real session limit
+                    // and is the one spelling every shipped browser knows:
+                    // Chromium's draft-07 client still sends it today, and
+                    // Safari 26.x refuses the session before CONNECT when a
+                    // server does not advertise it non-zero.
+                    put(settings::WT_MAX_SESSIONS_DRAFT07, s.wt_max_sessions)?;
                     // quiche peers (Chromium and derivatives) negotiate
                     // WebTransport by version intersection, and the draft-02
                     // spelling of this setting is a boolean enable flag there:
                     // only 0 and 1 are accepted, and 1 is what enables draft-02
-                    // on a client. Advertising the current codepoint alone
-                    // leaves such a peer with an empty version intersection
-                    // and the session fails with ERR_METHOD_NOT_SUPPORTED.
+                    // on a client. Firefox (Neqo) knows no other codepoint.
+                    // Omitting it leaves such a peer with an empty version
+                    // intersection and the session fails with
+                    // ERR_METHOD_NOT_SUPPORTED.
                     put(settings::WT_MAX_SESSIONS_DRAFT02, 1)?;
+                    // The draft-13 spelling (0x14e9cd29) is deliberately not
+                    // advertised: no shipped browser implements it, and Safari
+                    // 26.x fails the handshake when it appears next to the
+                    // draft-07 codepoint.
                 }
                 if s.wt_initial_max_data > 0 {
                     put(settings::WT_INITIAL_MAX_DATA, s.wt_initial_max_data)?;
