@@ -60,8 +60,7 @@
     "test:rust": "cargo test --workspace",
     "typecheck": "tsc --noEmit",
     "bench": "bun run bench/datagrams.ts",
-    "wpt": "bun wpt/run.ts",
-    "prepare": "husky"
+    "wpt": "bun wpt/run.ts"
   },
   "type": "module",
   "types": "js/index.d.ts"
