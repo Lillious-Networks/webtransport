@@ -28,7 +28,7 @@ export declare class WebTransportServer {
    * server stops. These happen before a session exists, so they cannot be
    * reported on one.
    */
-  nextError(): Promise<string | null>
+  nextError(): Promise<string | undefined | null>
   /**
    * Stops the server: closes the endpoint and ends both queues.
    *
@@ -41,7 +41,7 @@ export declare class WebTransportServer {
    */
   stop(): void
   /** Resolves with the next incoming session, or null once the server stops. */
-  accept(): Promise<IncomingSession | null>
+  accept(): Promise<IncomingSession | undefined | null>
 }
 
 /** A connected WebTransport session, as seen from JS. */
@@ -109,7 +109,7 @@ export declare class WebTransportSession {
    *
    * Returns owned bytes: the payload outlives the Rust buffer it arrived in.
    */
-  recvDatagram(): Promise<Uint8Array | null>
+  recvDatagram(): Promise<Uint8Array | undefined | null>
   /**
    * Resolves with up to `max` inbound datagrams, or null once the session
    * ends.
@@ -119,7 +119,7 @@ export declare class WebTransportSession {
    * path sustains millions a second; per-datagram promises sustain
    * thousands). One call per batch amortises that crossing.
    */
-  recvDatagrams(max: number): Promise<Array<Uint8Array> | null>
+  recvDatagrams(max: number): Promise<Array<Uint8Array> | undefined | null>
   /**
    * Switches inbound datagram delivery to a push pump.
    *
@@ -179,12 +179,12 @@ export declare class WebTransportSession {
    * Resolves with the next incoming unidirectional stream, or null once the
    * session ends.
    */
-  acceptUnidirectionalStream(): Promise<WtRecvStream | null>
+  acceptUnidirectionalStream(): Promise<WtRecvStream | undefined | null>
   /**
    * Resolves with the next incoming bidirectional stream, or null once the
    * session ends.
    */
-  acceptBidirectionalStream(): Promise<WtBidiStream | null>
+  acceptBidirectionalStream(): Promise<WtBidiStream | undefined | null>
   close(info?: JsCloseInfo | undefined | null): void
   /**
    * Begins draining: the peer is told to stop opening new streams while
@@ -206,8 +206,8 @@ export declare class WtRecvStream {
    *
    * `max` bounds the read so a BYOB reader asks for only what it can hold.
    */
-  read(max?: number | undefined | null): Promise<Uint8Array | null>
-  stop(code: number): Promise<void>
+  read(max?: number | undefined | null): Promise<Uint8Array | undefined | null>
+  stop(code: number): Promise<undefined>
   get bytesRead(): bigint
 }
 
@@ -219,21 +219,21 @@ export declare class WtSendStream {
    * The pending promise is what gives the JS WritableStream real
    * backpressure: it stays unresolved while the flow-control window is full.
    */
-  write(chunk: Uint8Array): Promise<void>
+  write(chunk: Uint8Array): Promise<undefined>
   /**
    * Writes only what fits the current flow-control window, returning how
    * many bytes were accepted. Backs `atomicWrite`.
    */
   writeSome(chunk: Uint8Array): Promise<number>
-  finish(): Promise<void>
-  reset(code: number): Promise<void>
+  finish(): Promise<undefined>
+  reset(code: number): Promise<undefined>
   /**
    * Resolves with the peer's error code once it stops reading, or null if
    * the stream ended without one.
    */
-  stopped(): Promise<number | null>
+  stopped(): Promise<number | undefined | null>
   get bytesWritten(): bigint
-  setPriority(priority: number): Promise<void>
+  setPriority(priority: number): Promise<undefined>
   /** The scheduler id, so send group and order can be changed later. */
   get schedulerId(): bigint | null
   /** Moves this stream into a different send group, or the null group. */
@@ -251,7 +251,7 @@ export declare class WtSendStream {
  * their promises resolve before the environment goes away.
  *
  * Called synchronously from the JS `exit` event, which fires before teardown
- * begins. Blocking there is safe — nothing else needs the JS thread — and it
+ * begins. Blocking there is safe, since nothing else needs the JS thread, and it
  * is exactly what lets everything parked on the endpoints drain in time,
  * rather than being torn down mid-flight.
  *

@@ -128,7 +128,7 @@ native.installExitHook();
 // The exit event fires before teardown begins, unlike the napi cleanup hook
 // above, which Bun runs while the environment is already being destroyed.
 // Closing from here lets the settle wait in closeAllEndpoints() actually run,
-// so everything parked on the endpoints — accepts, reads, closed waiters —
+// so everything parked on the endpoints (accepts, reads, closed waiters)
 // resolves while the runtime still exists.
 process.on("exit", () => {
   native.closeAllEndpoints();

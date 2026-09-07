@@ -20,8 +20,22 @@ const { cert, key, hash } = generateSelfSigned(["localhost"]);
 
 /** Servers started by tests, stopped together at the end. */
 const servers: Array<{ stop(): void }> = [];
+/// Transports handed out by `pair`, closed in teardown.
+///
+/// A transport left open at process exit keeps addon handles with work still
+/// pending on them, and abandoning those is what aborts the process once the
+/// runtime is torn down: the suite reports every test passing and the runner
+/// still sees a crash. Individual tests need not close what they open.
+const transports: Array<{ close(): void; closed: Promise<unknown> }> = [];
 
 afterAll(async () => {
+  // Transports first: closing one settles the work pending on its session and
+  // streams, which is what has to happen before the process goes away. A
+  // transport a test already closed settles immediately.
+  for (const wt of transports) {
+    wt.close();
+    await wt.closed.catch(() => {});
+  }
   // Awaited; see the note in datagrams.test.ts.
   await Promise.all(servers.map((s) => s.stop()));
 });
@@ -60,6 +74,7 @@ async function pair() {
     if (Date.now() - start > 5000) throw new Error("server never accepted");
     await Bun.sleep(5);
   }
+  transports.push(wt);
   return { wt, session: accepted.shift(), server };
 }
 

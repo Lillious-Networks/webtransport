@@ -46,7 +46,7 @@ pub fn install_exit_hook(env: &Env) {
 /// their promises resolve before the environment goes away.
 ///
 /// Called synchronously from the JS `exit` event, which fires before teardown
-/// begins. Blocking there is safe — nothing else needs the JS thread — and it
+/// begins. Blocking there is safe, since nothing else needs the JS thread, and it
 /// is exactly what lets everything parked on the endpoints drain in time,
 /// rather than being torn down mid-flight.
 ///
@@ -305,12 +305,16 @@ impl WebTransportSession {
     ///
     /// Returns owned bytes: the payload outlives the Rust buffer it arrived in.
     #[napi]
-    pub async fn recv_datagram(&self) -> Option<Uint8Array> {
-        self.inner
-            .session
-            .recv_datagram()
-            .await
-            .map(|b| Uint8Array::new(b.to_vec()))
+    pub fn recv_datagram(&self, env: &Env) -> Result<AsyncBlock<Option<Uint8Array>>> {
+        // Owns its state rather than borrowing `self`; see `closed`.
+        let session = self.inner.session.clone();
+        AsyncBlockBuilder::new(async move {
+            Ok(session
+                .recv_datagram()
+                .await
+                .map(|b| Uint8Array::new(b.to_vec())))
+        })
+        .build(env)
     }
 
     /// Resolves with up to `max` inbound datagrams, or null once the session
@@ -321,18 +325,25 @@ impl WebTransportSession {
     /// path sustains millions a second; per-datagram promises sustain
     /// thousands). One call per batch amortises that crossing.
     #[napi]
-    pub async fn recv_datagrams(&self, max: u32) -> Option<Vec<Uint8Array>> {
-        let batch = self
-            .inner
-            .session
-            .recv_datagrams(max.clamp(1, 4096) as usize)
-            .await?;
-        Some(
-            batch
-                .into_iter()
-                .map(|b| Uint8Array::new(b.to_vec()))
-                .collect(),
-        )
+    pub fn recv_datagrams(
+        &self,
+        max: u32,
+        env: &Env,
+    ) -> Result<AsyncBlock<Option<Vec<Uint8Array>>>> {
+        // Owns its state rather than borrowing `self`; see `closed`.
+        let session = self.inner.session.clone();
+        AsyncBlockBuilder::new(async move {
+            let Some(batch) = session.recv_datagrams(max.clamp(1, 4096) as usize).await else {
+                return Ok(None);
+            };
+            Ok(Some(
+                batch
+                    .into_iter()
+                    .map(|b| Uint8Array::new(b.to_vec()))
+                    .collect(),
+            ))
+        })
+        .build(env)
     }
 
     /// Switches inbound datagram delivery to a push pump.
@@ -398,33 +409,47 @@ impl WebTransportSession {
     /// Resolves when the session reaches a terminal state, reporting how it
     /// ended. Backs the `closed` promise.
     #[napi]
-    pub async fn closed(&self) -> JsCloseInfo {
+    pub fn closed(&self, env: &Env) -> Result<AsyncBlock<JsCloseInfo>> {
+        // Sync, returning a promise built from owned state, rather than an
+        // `async fn(&self)`.
+        //
+        // A `#[napi] async fn` taking `&self` roots the JS object for the life
+        // of the future, and napi-rs aborts the process outright if that root
+        // is released from a thread other than the one that created it. A
+        // promise still pending when the runtime shuts down is dropped on a
+        // Tokio worker, so any outstanding promise at exit killed the process
+        // after the program had already finished successfully. With nothing
+        // rooted there is no root to release, and napi's release path returns
+        // early instead.
         let mut watch = self.inner.session.watch();
-        loop {
-            let state = watch.borrow().clone();
-            match state {
-                State::Closed(info) => {
-                    return JsCloseInfo {
-                        close_code: info.code,
-                        reason: info.reason,
+        AsyncBlockBuilder::new(async move {
+            loop {
+                let state = watch.borrow().clone();
+                match state {
+                    State::Closed(info) => {
+                        return Ok(JsCloseInfo {
+                            close_code: info.code,
+                            reason: info.reason,
+                        })
                     }
+                    State::Failed(reason) => {
+                        return Ok(JsCloseInfo {
+                            close_code: 0,
+                            reason,
+                        })
+                    }
+                    _ => {}
                 }
-                State::Failed(reason) => {
-                    return JsCloseInfo {
+                if watch.changed().await.is_err() {
+                    // The session was dropped without a recorded close.
+                    return Ok(JsCloseInfo {
                         close_code: 0,
-                        reason,
-                    }
+                        reason: String::new(),
+                    });
                 }
-                _ => {}
             }
-            if watch.changed().await.is_err() {
-                // The session was dropped without a recorded close.
-                return JsCloseInfo {
-                    close_code: 0,
-                    reason: String::new(),
-                };
-            }
-        }
+        })
+        .build(env)
     }
 
     /// Resolves once the session begins draining. Backs the `draining` promise.
@@ -442,17 +467,21 @@ impl WebTransportSession {
     /// leaves its own `draining` promise pending when this answers `false`,
     /// which is what the spec asks for.
     #[napi]
-    pub async fn draining(&self) -> bool {
+    pub fn draining(&self, env: &Env) -> Result<AsyncBlock<bool>> {
+        // Owns its state rather than borrowing `self`; see `closed`.
         let mut watch = self.inner.session.watch();
-        loop {
-            let state = watch.borrow().clone();
-            if matches!(state, State::Draining) {
-                return true;
+        AsyncBlockBuilder::new(async move {
+            loop {
+                let state = watch.borrow().clone();
+                if matches!(state, State::Draining) {
+                    return Ok(true);
+                }
+                if state.is_terminal() || watch.changed().await.is_err() {
+                    return Ok(false);
+                }
             }
-            if state.is_terminal() || watch.changed().await.is_err() {
-                return false;
-            }
-        }
+        })
+        .build(env)
     }
 
     /// Opens a unidirectional stream to the peer.
@@ -461,47 +490,51 @@ impl WebTransportSession {
     /// order is a string so the full 64-bit range survives the JS boundary,
     /// which cannot represent it as a number.
     #[napi]
-    pub async fn create_unidirectional_stream(
+    pub fn create_unidirectional_stream(
         &self,
         send_group: Option<BigInt>,
         send_order: Option<BigInt>,
         wait_until_available: Option<bool>,
-    ) -> Result<WtSendStream> {
-        let send = self
-            .inner
-            .session
-            .open_uni_with(
-                to_group(send_group),
-                to_order(send_order),
-                wait_until_available.unwrap_or(true),
-            )
-            .await
-            .map_err(to_napi_err)?;
-        Ok(WtSendStream { inner: send })
+        env: &Env,
+    ) -> Result<AsyncBlock<WtSendStream>> {
+        // Owns its state rather than borrowing `self`; see `closed`.
+        let session = self.inner.session.clone();
+        let (group, order) = (to_group(send_group), to_order(send_order));
+        let wait = wait_until_available.unwrap_or(true);
+        AsyncBlockBuilder::new(async move {
+            let send = session
+                .open_uni_with(group, order, wait)
+                .await
+                .map_err(to_napi_err)?;
+            Ok(WtSendStream { inner: send })
+        })
+        .build(env)
     }
 
     /// Opens a bidirectional stream to the peer.
     #[napi]
-    pub async fn create_bidirectional_stream(
+    pub fn create_bidirectional_stream(
         &self,
         send_group: Option<BigInt>,
         send_order: Option<BigInt>,
         wait_until_available: Option<bool>,
-    ) -> Result<WtBidiStream> {
-        let stream = self
-            .inner
-            .session
-            .open_bi_with(
-                to_group(send_group),
-                to_order(send_order),
-                wait_until_available.unwrap_or(true),
-            )
-            .await
-            .map_err(to_napi_err)?;
-        Ok(WtBidiStream {
-            send: stream.send,
-            recv: stream.recv,
+        env: &Env,
+    ) -> Result<AsyncBlock<WtBidiStream>> {
+        // Owns its state rather than borrowing `self`; see `closed`.
+        let session = self.inner.session.clone();
+        let (group, order) = (to_group(send_group), to_order(send_order));
+        let wait = wait_until_available.unwrap_or(true);
+        AsyncBlockBuilder::new(async move {
+            let stream = session
+                .open_bi_with(group, order, wait)
+                .await
+                .map_err(to_napi_err)?;
+            Ok(WtBidiStream {
+                send: stream.send,
+                recv: stream.recv,
+            })
         })
+        .build(env)
     }
 
     /// Derives keying material bound to this session.
@@ -539,22 +572,37 @@ impl WebTransportSession {
     /// Resolves with the next incoming unidirectional stream, or null once the
     /// session ends.
     #[napi]
-    pub async fn accept_unidirectional_stream(&self) -> Option<WtRecvStream> {
-        self.inner
-            .session
-            .accept_uni()
-            .await
-            .map(|recv| WtRecvStream { inner: recv })
+    pub fn accept_unidirectional_stream(
+        &self,
+        env: &Env,
+    ) -> Result<AsyncBlock<Option<WtRecvStream>>> {
+        // Owns its state rather than borrowing `self`; see `closed`.
+        let session = self.inner.session.clone();
+        AsyncBlockBuilder::new(async move {
+            Ok(session
+                .accept_uni()
+                .await
+                .map(|recv| WtRecvStream { inner: recv }))
+        })
+        .build(env)
     }
 
     /// Resolves with the next incoming bidirectional stream, or null once the
     /// session ends.
     #[napi]
-    pub async fn accept_bidirectional_stream(&self) -> Option<WtBidiStream> {
-        self.inner.session.accept_bi().await.map(|s| WtBidiStream {
-            send: s.send,
-            recv: s.recv,
+    pub fn accept_bidirectional_stream(
+        &self,
+        env: &Env,
+    ) -> Result<AsyncBlock<Option<WtBidiStream>>> {
+        // Owns its state rather than borrowing `self`; see `closed`.
+        let session = self.inner.session.clone();
+        AsyncBlockBuilder::new(async move {
+            Ok(session.accept_bi().await.map(|s| WtBidiStream {
+                send: s.send,
+                recv: s.recv,
+            }))
         })
+        .build(env)
     }
 
     #[napi]
@@ -589,39 +637,55 @@ impl WtSendStream {
     /// The pending promise is what gives the JS WritableStream real
     /// backpressure: it stays unresolved while the flow-control window is full.
     #[napi]
-    pub async fn write(&self, chunk: Uint8Array) -> Result<()> {
-        self.inner
-            .write_all(chunk.as_ref())
-            .await
-            .map_err(to_napi_err)
+    pub fn write(&self, chunk: Uint8Array, env: &Env) -> Result<AsyncBlock<()>> {
+        // Owns its state rather than borrowing `self`; see `closed` on the
+        // session. The chunk is copied here because JS may mutate the array
+        // once this returns, long before the write reaches the wire.
+        let inner = self.inner.clone();
+        let bytes = chunk.as_ref().to_vec();
+        AsyncBlockBuilder::new(async move { inner.write_all(&bytes).await.map_err(to_napi_err) })
+            .build(env)
     }
 
     /// Writes only what fits the current flow-control window, returning how
     /// many bytes were accepted. Backs `atomicWrite`.
     #[napi]
-    pub async fn write_some(&self, chunk: Uint8Array) -> Result<u32> {
-        self.inner
-            .write_some(chunk.as_ref())
-            .await
-            .map(|n| n as u32)
-            .map_err(to_napi_err)
+    pub fn write_some(&self, chunk: Uint8Array, env: &Env) -> Result<AsyncBlock<u32>> {
+        // Owns its state rather than borrowing `self`; see `write`.
+        let inner = self.inner.clone();
+        let bytes = chunk.as_ref().to_vec();
+        AsyncBlockBuilder::new(async move {
+            inner
+                .write_some(&bytes)
+                .await
+                .map(|n| n as u32)
+                .map_err(to_napi_err)
+        })
+        .build(env)
     }
 
     #[napi]
-    pub async fn finish(&self) -> Result<()> {
-        self.inner.finish().await.map_err(to_napi_err)
+    pub fn finish(&self, env: &Env) -> Result<AsyncBlock<()>> {
+        // Owns its state rather than borrowing `self`; see `write`.
+        let inner = self.inner.clone();
+        AsyncBlockBuilder::new(async move { inner.finish().await.map_err(to_napi_err) }).build(env)
     }
 
     #[napi]
-    pub async fn reset(&self, code: u32) -> Result<()> {
-        self.inner.reset(code).await.map_err(to_napi_err)
+    pub fn reset(&self, code: u32, env: &Env) -> Result<AsyncBlock<()>> {
+        // Owns its state rather than borrowing `self`; see `write`.
+        let inner = self.inner.clone();
+        AsyncBlockBuilder::new(async move { inner.reset(code).await.map_err(to_napi_err) })
+            .build(env)
     }
 
     /// Resolves with the peer's error code once it stops reading, or null if
     /// the stream ended without one.
     #[napi]
-    pub async fn stopped(&self) -> Result<Option<u32>> {
-        self.inner.stopped().await.map_err(to_napi_err)
+    pub fn stopped(&self, env: &Env) -> Result<AsyncBlock<Option<u32>>> {
+        // Owns its state rather than borrowing `self`; see `write`.
+        let inner = self.inner.clone();
+        AsyncBlockBuilder::new(async move { inner.stopped().await.map_err(to_napi_err) }).build(env)
     }
 
     #[napi(getter)]
@@ -630,8 +694,14 @@ impl WtSendStream {
     }
 
     #[napi]
-    pub async fn set_priority(&self, priority: i32) {
-        self.inner.set_priority(priority).await;
+    pub fn set_priority(&self, priority: i32, env: &Env) -> Result<AsyncBlock<()>> {
+        // Owns its state rather than borrowing `self`; see `write`.
+        let inner = self.inner.clone();
+        AsyncBlockBuilder::new(async move {
+            inner.set_priority(priority).await;
+            Ok(())
+        })
+        .build(env)
     }
 
     /// The scheduler id, so send group and order can be changed later.
@@ -666,17 +736,26 @@ impl WtRecvStream {
     ///
     /// `max` bounds the read so a BYOB reader asks for only what it can hold.
     #[napi]
-    pub async fn read(&self, max: Option<u32>) -> Result<Option<Uint8Array>> {
-        self.inner
-            .read_chunk(max.map(|m| m as usize))
-            .await
-            .map(|opt| opt.map(|b| Uint8Array::new(b.to_vec())))
-            .map_err(to_napi_err)
+    pub fn read(&self, max: Option<u32>, env: &Env) -> Result<AsyncBlock<Option<Uint8Array>>> {
+        // Owns its state rather than borrowing `self`; see `closed` on the
+        // session.
+        let inner = self.inner.clone();
+        AsyncBlockBuilder::new(async move {
+            inner
+                .read_chunk(max.map(|m| m as usize))
+                .await
+                .map(|opt| opt.map(|b| Uint8Array::new(b.to_vec())))
+                .map_err(to_napi_err)
+        })
+        .build(env)
     }
 
     #[napi]
-    pub async fn stop(&self, code: u32) -> Result<()> {
-        self.inner.stop(code).await.map_err(to_napi_err)
+    pub fn stop(&self, code: u32, env: &Env) -> Result<AsyncBlock<()>> {
+        // Owns its state rather than borrowing `self`; see `read`.
+        let inner = self.inner.clone();
+        AsyncBlockBuilder::new(async move { inner.stop(code).await.map_err(to_napi_err) })
+            .build(env)
     }
 
     #[napi(getter)]
@@ -914,16 +993,22 @@ impl WebTransportServer {
     /// server stops. These happen before a session exists, so they cannot be
     /// reported on one.
     #[napi]
-    pub async fn next_error(&self) -> Option<String> {
-        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
-            return None;
-        }
-        let mut rx = self.errors.lock().await;
+    pub fn next_error(&self, env: &Env) -> Result<AsyncBlock<Option<String>>> {
+        // Owns its state rather than borrowing `self`; see `closed`.
+        let errors = self.errors.clone();
+        let stopped = self.stopped.clone();
         let mut stop = self.stop_signal.subscribe();
-        tokio::select! {
-            message = rx.recv() => message,
-            _ = stop.wait_for(|stopped| *stopped) => None,
-        }
+        AsyncBlockBuilder::new(async move {
+            if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(None);
+            }
+            let mut rx = errors.lock().await;
+            Ok(tokio::select! {
+                message = rx.recv() => message,
+                _ = stop.wait_for(|stopped| *stopped) => None,
+            })
+        })
+        .build(env)
     }
 
     /// Stops the server: closes the endpoint and ends both queues.
@@ -954,30 +1039,36 @@ impl WebTransportServer {
 
     /// Resolves with the next incoming session, or null once the server stops.
     #[napi]
-    pub async fn accept(&self) -> Option<IncomingSession> {
-        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
-            return None;
-        }
-        let mut rx = self.incoming.lock().await;
+    pub fn accept(&self, env: &Env) -> Result<AsyncBlock<Option<IncomingSession>>> {
+        // Owns its state rather than borrowing `self`; see `closed`.
+        let incoming_rx = self.incoming.clone();
+        let stopped = self.stopped.clone();
         let mut stop = self.stop_signal.subscribe();
-        let next = tokio::select! {
-            incoming = rx.recv() => incoming,
-            _ = stop.wait_for(|stopped| *stopped) => None,
-        };
-        next.map(|incoming| IncomingSession {
-            path: incoming.path.clone(),
-            authority: incoming.authority.clone(),
-            headers: incoming
-                .headers
-                .iter()
-                .map(|(n, v)| JsHeader {
-                    name: n.clone(),
-                    value: v.clone(),
-                })
-                .collect(),
-            protocols: incoming.protocols.clone(),
-            inner: Some(incoming),
+        AsyncBlockBuilder::new(async move {
+            if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(None);
+            }
+            let mut rx = incoming_rx.lock().await;
+            let next = tokio::select! {
+                incoming = rx.recv() => incoming,
+                _ = stop.wait_for(|stopped| *stopped) => None,
+            };
+            Ok(next.map(|incoming| IncomingSession {
+                path: incoming.path.clone(),
+                authority: incoming.authority.clone(),
+                headers: incoming
+                    .headers
+                    .iter()
+                    .map(|(n, v)| JsHeader {
+                        name: n.clone(),
+                        value: v.clone(),
+                    })
+                    .collect(),
+                protocols: incoming.protocols.clone(),
+                inner: Some(incoming),
+            }))
         })
+        .build(env)
     }
 }
 

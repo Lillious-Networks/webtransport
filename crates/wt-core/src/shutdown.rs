@@ -34,8 +34,8 @@ pub fn register(endpoint: &quinn::Endpoint) {
 
 /// Closes every registered endpoint, signalling only.
 ///
-/// The closes are synchronous, but the fallout — parked futures resolving,
-/// drivers retiring — is not waited for. That makes this safe to run from a
+/// The closes are synchronous, but the fallout (parked futures resolving,
+/// drivers retiring) is not waited for. That makes this safe to run from a
 /// napi cleanup hook, which fires while teardown is already underway and must
 /// not block; it is a fallback for paths that never ran
 /// [`close_all_and_settle`], which is the real exit-time entry point.
@@ -52,8 +52,8 @@ pub fn close_all() {
 /// Closes every registered endpoint and waits out the fallout, synchronously.
 ///
 /// The settle window gives the runtime the time to complete whatever was
-/// parked on the endpoints — pending `accept`s, stream `read`s, `closed`
-/// waiters — so that by the time the caller proceeds to teardown nothing
+/// parked on the endpoints: pending `accept`s, stream `read`s and `closed`
+/// waiters, so that by the time the caller proceeds to teardown nothing
 /// async is still in flight. Bounded, and only paid when there was anything
 /// to close.
 pub fn close_all_and_settle() {
