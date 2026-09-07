@@ -661,6 +661,26 @@ impl Session {
         self.close_queues();
     }
 
+    /// Ends the session locally, without announcing it to the peer.
+    ///
+    /// `close` spawns a task to write the WT_CLOSE_SESSION capsule, and that
+    /// task holds a `Session` clone. Called from a `Drop`, it would resurrect
+    /// the value being dropped and then contend for locks the dropping thread
+    /// may already hold. This does the half that matters for teardown: it
+    /// settles the state and ends the queues, so anything parked on this
+    /// session resolves instead of staying pending.
+    ///
+    /// The peer is not told. That is acceptable only where the connection is
+    /// going away anyway, which is the case at drop: the endpoint close that
+    /// follows is what the peer actually observes.
+    pub fn close_locally(&self, info: CloseInfo) {
+        if self.inner.closing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.set_state(State::Closed(info));
+        self.close_queues();
+    }
+
     /// Ends every inbound queue, so pending receives resolve rather than hang.
     ///
     /// The stream receivers are behind a lock an in-flight accept is holding,

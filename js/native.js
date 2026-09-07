@@ -121,6 +121,15 @@ export const native = load();
 
 // Closes the QUIC endpoints before the addon's Tokio runtime is torn down at
 // process exit. Without it a live endpoint driver is dropped mid-flight and
-// quinn aborts the process, which turns a clean run into a non-zero exit with
-// nothing in the output to explain it.
+// the process aborts, turning a clean run into a non-zero exit with nothing in
+// the output to explain it.
 native.installExitHook();
+
+// The exit event fires before teardown begins, unlike the napi cleanup hook
+// above, which Bun runs while the environment is already being destroyed.
+// Closing from here lets the settle wait in closeAllEndpoints() actually run,
+// so everything parked on the endpoints — accepts, reads, closed waiters —
+// resolves while the runtime still exists.
+process.on("exit", () => {
+  native.closeAllEndpoints();
+});

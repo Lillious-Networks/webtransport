@@ -2,21 +2,24 @@
 //!
 //! A quinn endpoint's driver runs as a task on the Tokio runtime that created
 //! it. The addon does not own that runtime: napi does, and it shuts the runtime
-//! down as the module unloads at process exit. If an endpoint is still live at
-//! that point its driver is dropped mid-flight, and quinn aborts the process.
+//! down as the module unloads at process exit. An endpoint still live at that
+//! point has its driver dropped mid-flight, and the process aborts.
 //!
 //! From the outside that looks like a crash after everything succeeded: the
-//! test suite passes, then the process dies with `abort()` (`Abort trap: 6` on
-//! macOS, `0xC0000409` on Windows), which a shell reports as a bare non-zero
-//! exit. Nothing in the run points at the endpoint, because by then the work is
-//! long finished.
+//! test suite passes, then the process dies, which a shell reports only as a
+//! non-zero exit. Nothing in the run points at the endpoint, because by then
+//! the work is long finished.
 //!
 //! So every endpoint registers here when it is created, and the addon closes
-//! them all from a module-teardown hook while the runtime is still alive.
+//! them all before the environment goes away. The trigger is the JS `exit`
+//! event: it fires before teardown begins, so the settle window in
+//! [`close_all_and_settle`] can safely let parked work drain. A napi cleanup
+//! hook also calls [`close_all`] as a fallback, but on Bun it fires while the
+//! environment is already being destroyed, so it must not block.
 
 use std::sync::Mutex;
 
-/// Every endpoint created in this process, weakly identified.
+/// Every endpoint created in this process.
 ///
 /// Closing an endpoint is idempotent and cheap, and this only ever runs at
 /// teardown, so entries are kept rather than reaped as endpoints go idle.
@@ -29,17 +32,31 @@ pub fn register(endpoint: &quinn::Endpoint) {
     }
 }
 
-/// Closes every registered endpoint.
+/// Closes every registered endpoint, signalling only.
 ///
-/// Call from module teardown, while the Tokio runtime still exists. `close` is
-/// synchronous and tells each driver to finish, which is what lets the runtime
-/// shut down without dropping a live driver. Peers get a connection close
-/// rather than silence.
-///
-/// A poisoned lock is ignored rather than propagated: this runs while the
-/// process is going away, and panicking there loses the clean exit it exists to
-/// produce.
+/// The closes are synchronous, but the fallout — parked futures resolving,
+/// drivers retiring — is not waited for. That makes this safe to run from a
+/// napi cleanup hook, which fires while teardown is already underway and must
+/// not block; it is a fallback for paths that never ran
+/// [`close_all_and_settle`], which is the real exit-time entry point.
 pub fn close_all() {
+    let endpoints = match ENDPOINTS.lock() {
+        Ok(mut endpoints) => std::mem::take(&mut *endpoints),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    };
+    for endpoint in endpoints {
+        endpoint.close(0u32.into(), b"process exit");
+    }
+}
+
+/// Closes every registered endpoint and waits out the fallout, synchronously.
+///
+/// The settle window gives the runtime the time to complete whatever was
+/// parked on the endpoints — pending `accept`s, stream `read`s, `closed`
+/// waiters — so that by the time the caller proceeds to teardown nothing
+/// async is still in flight. Bounded, and only paid when there was anything
+/// to close.
+pub fn close_all_and_settle() {
     let endpoints = match ENDPOINTS.lock() {
         Ok(mut endpoints) => std::mem::take(&mut *endpoints),
         Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
@@ -47,33 +64,13 @@ pub fn close_all() {
     if endpoints.is_empty() {
         return;
     }
-
-    for endpoint in &endpoints {
+    for endpoint in endpoints {
         endpoint.close(0u32.into(), b"process exit");
     }
-
-    // `close` only signals the drivers; each finishes asynchronously, and the
-    // abort happens precisely when the runtime disappears before they do.
-    // `wait_idle` is what actually waits for a driver to retire, so drive it
-    // to completion here, on a runtime of our own.
-    //
-    // A private current-thread runtime rather than the caller's: this runs
-    // from a napi cleanup hook on the JS thread, where the addon's runtime is
-    // already being shut down, so blocking on it would deadlock. The wait is
-    // bounded because a peer that never acknowledges a close must not hang
-    // process exit.
-    let waiter = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build();
-    let Ok(waiter) = waiter else {
-        return;
-    };
-    waiter.block_on(async {
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-            for endpoint in &endpoints {
-                endpoint.wait_idle().await;
-            }
-        })
-        .await;
-    });
+    // The closes above only signal; the runtime polls the woken tasks and
+    // settles their deferreds on its own threads, so a brief block here is
+    // what lets that drain before the environment goes away. This must not
+    // run during teardown itself, where the environment is being destroyed
+    // concurrently; it runs from the JS `exit` event, before teardown begins.
+    std::thread::sleep(std::time::Duration::from_millis(200));
 }

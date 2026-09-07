@@ -185,6 +185,21 @@ impl Server {
     }
 }
 
+impl Drop for Server {
+    /// Closes the endpoint when the server goes away.
+    ///
+    /// An application is not required to call `close`, and a server that is
+    /// simply dropped must not leave its endpoint driver running: a live
+    /// driver at process exit aborts the process on Linux, after everything
+    /// else has succeeded. Closing here makes that impossible to get wrong
+    /// from the outside, rather than relying on a teardown hook that may run
+    /// too late or not at all.
+    fn drop(&mut self) {
+        self.endpoint.close(0u32.into(), b"server dropped");
+    }
+}
+
+
 /// Drives one QUIC connection, emitting the WebTransport sessions on it.
 async fn serve_connection(
     incoming: quinn::Incoming,

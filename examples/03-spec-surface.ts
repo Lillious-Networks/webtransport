@@ -80,5 +80,5 @@ wt.close({ closeCode: 0, reason: "done" });
 await wt.closed;
 console.log("client: closed");
 
-server.stop();
+await server.stop();
 process.exit(0);

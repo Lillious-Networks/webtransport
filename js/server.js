@@ -286,7 +286,7 @@ export async function serve(options) {
 
   // Connection-level failures never reach a session, so they are drained
   // separately and reported through the same handler.
-  (async () => {
+  const errorLoop = (async () => {
     while (!stopped) {
       const message = await server.nextError();
       if (message === null || message === undefined) return;
@@ -294,7 +294,7 @@ export async function serve(options) {
     }
   })();
 
-  (async () => {
+  const acceptLoop = (async () => {
     while (!stopped) {
       let incoming;
       try {
@@ -320,7 +320,7 @@ export async function serve(options) {
     }
   })();
 
-  return {
+  const handle = {
     get port() {
       return server.port;
     },
@@ -330,7 +330,17 @@ export async function serve(options) {
       // `nextError()`, which resolve only once the addon ends those queues.
       // Leaving them pending keeps the event loop alive so the process never
       // exits, and leaves napi calls outstanding at teardown, which aborts it.
-      return server.stop();
+      // Synchronous, so a caller that forgets to await cannot reintroduce that.
+      server.stop();
+      // Both loops may have an `accept()` or `nextError()` promise in flight.
+      // Abandoning one is what aborts the process at exit: the promise is
+      // still outstanding when the environment is torn down, and napi-rs
+      // aborts releasing a borrow scope it rooted on the JS thread. Awaiting
+      // them here is what actually settles those promises, and it is why this
+      // returns one rather than being fire and forget.
+      return Promise.all([acceptLoop, errorLoop]).then(() => undefined);
     },
   };
+
+  return handle;
 }

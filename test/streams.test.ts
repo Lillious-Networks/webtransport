@@ -21,8 +21,9 @@ const { cert, key, hash } = generateSelfSigned(["localhost"]);
 /** Servers started by tests, stopped together at the end. */
 const servers: Array<{ stop(): void }> = [];
 
-afterAll(() => {
-  for (const s of servers) s.stop();
+afterAll(async () => {
+  // Awaited; see the note in datagrams.test.ts.
+  await Promise.all(servers.map((s) => s.stop()));
 });
 
 function options(extra: Record<string, unknown> = {}) {

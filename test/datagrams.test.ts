@@ -31,8 +31,10 @@ beforeAll(async () => {
   });
 });
 
-afterAll(() => {
-  server.stop();
+afterAll(async () => {
+  // Awaited: stop settles the accept loops' in-flight promises, and an
+  // outstanding napi promise at exit aborts the process.
+  await server.stop();
 });
 
 function url(path = "/") {

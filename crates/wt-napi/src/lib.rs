@@ -20,16 +20,14 @@ use napi_derive::napi;
 
 /// Closes every QUIC endpoint before the runtime that drives them goes away.
 ///
-/// napi owns the Tokio runtime the endpoint drivers run on and shuts it down at
-/// process exit. A driver still live at that moment is dropped mid-flight, and
-/// quinn aborts the process: the run succeeds, then dies with `abort()`, which
-/// a shell reports only as a non-zero exit with nothing pointing at the cause.
-/// The hook runs while the runtime is still up, so drivers finish rather than
-/// being torn out from under themselves.
+/// napi owns the Tokio runtime the endpoint drivers run on and shuts it down
+/// at process exit. A driver still live at that moment is dropped mid-flight
+/// and the process aborts: the run succeeds, then dies, which a shell reports
+/// only as a non-zero exit with nothing pointing at the cause.
 ///
 /// Called once by the JS layer as it loads. A `#[module_exports]` hook would
-/// register this without the JS side needing to know, but that macro is behind
-/// napi-rs's compat mode, and the async entry points cannot take an `Env`.
+/// register this without the JS side knowing, but that macro sits behind
+/// napi-rs's compat mode and the async entry points cannot take an `Env`.
 /// Repeat calls are no-ops.
 #[napi]
 pub fn install_exit_hook(env: &Env) {
@@ -42,6 +40,22 @@ pub fn install_exit_hook(env: &Env) {
         });
     });
 }
+
+/// Closes every QUIC endpoint, then blocks briefly while the runtime settles
+/// the fallout: parked `accept`s, `read`s and `closed` waiters complete and
+/// their promises resolve before the environment goes away.
+///
+/// Called synchronously from the JS `exit` event, which fires before teardown
+/// begins. Blocking there is safe — nothing else needs the JS thread — and it
+/// is exactly what lets everything parked on the endpoints drain in time,
+/// rather than being torn down mid-flight.
+///
+/// The wait is bounded and only paid when there was something to close.
+#[napi]
+pub fn close_all_endpoints() {
+    wt_core::shutdown::close_all_and_settle();
+}
+
 use std::sync::Arc;
 use wt_core::tls::{CertHash, HashAlgorithm};
 use wt_core::{client, server, CloseInfo, Session, State};
@@ -139,6 +153,27 @@ struct SessionHolder {
     /// would close the session. Absent for server-side sessions, which are kept
     /// alive by the server's connection task instead.
     _client: Option<client::ClientSession>,
+}
+
+impl Drop for SessionHolder {
+    /// Ends the session when JS lets go of its handle.
+    ///
+    /// An application is not obliged to call `close`, but a session left open
+    /// keeps `accept_bi`, `accept_uni` and the session watchers parked as napi
+    /// futures. At process exit the Tokio runtime cancels those, and napi-rs
+    /// aborts when a borrow scope rooted on the JS thread is released from a
+    /// worker thread: the run succeeds and the process still dies. Closing
+    /// here resolves them while the runtime is healthy, so nothing is parked
+    /// by the time teardown starts.
+    ///
+    /// Idempotent: `Session::close` returns early once the session is closing,
+    /// so this costs nothing when the application did call `close`.
+    fn drop(&mut self) {
+        // Local close only: the peer-facing `close` spawns a task holding a
+        // `Session` clone, which from here would resurrect the value being
+        // dropped and deadlock against the locks this thread may hold.
+        self.session.close_locally(CloseInfo::default());
+    }
 }
 
 #[napi]
@@ -731,6 +766,34 @@ pub struct WebTransportServer {
     incoming: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<server::IncomingSession>>>,
     /// Connection-level failures, which happen before any session exists.
     errors: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>>,
+    /// Set by `stop`, so a parked `accept` resolves to null rather than
+    /// waiting on a queue whose sender may take a moment to drop.
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    /// Wakes calls already parked when `stop` runs. The flag alone is only
+    /// read on entry, so without this an in-flight `accept` waits for good and
+    /// the process hangs instead of exiting.
+    ///
+    /// A watch rather than a `Notify`: `Notify::notify_waiters` wakes only the
+    /// waiters registered at that instant, and a `select!` arm recreates its
+    /// future on every poll, so a stop landing in that window is lost and the
+    /// wait never ends. A watch holds the value, so a receiver created after
+    /// the change still sees it.
+    stop_signal: tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for WebTransportServer {
+    /// Stops the server when JS lets go of its handle.
+    ///
+    /// An application is not obliged to call `stop`, and a server left running
+    /// keeps `accept` and `next_error` parked as napi futures. At process exit
+    /// the Tokio runtime cancels those, and napi-rs aborts when a borrow scope
+    /// rooted on the JS thread is released from a worker: the run succeeds and
+    /// the process still dies. Going through `stop` rather than closing the
+    /// endpoint alone matters, because closing on its own leaves an in-flight
+    /// `accept` parked and the process hangs instead.
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 /// An incoming session, before the application accepts it.
@@ -836,6 +899,8 @@ impl WebTransportServer {
             server: Arc::new(server),
             incoming: Arc::new(tokio::sync::Mutex::new(incoming)),
             errors: Arc::new(tokio::sync::Mutex::new(errors_rx)),
+            stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stop_signal: tokio::sync::watch::channel(false).0,
         })
     }
 
@@ -850,8 +915,15 @@ impl WebTransportServer {
     /// reported on one.
     #[napi]
     pub async fn next_error(&self) -> Option<String> {
+        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         let mut rx = self.errors.lock().await;
-        rx.recv().await
+        let mut stop = self.stop_signal.subscribe();
+        tokio::select! {
+            message = rx.recv() => message,
+            _ = stop.wait_for(|stopped| *stopped) => None,
+        }
     }
 
     /// Stops the server: closes the endpoint and ends both queues.
@@ -863,17 +935,36 @@ impl WebTransportServer {
     /// process. Closing the receivers resolves them to null, so the JS loops
     /// end and the runtime can drain.
     #[napi]
-    pub async fn stop(&self) {
+    pub fn stop(&self) {
         self.server.close();
-        self.incoming.lock().await.close();
-        self.errors.lock().await.close();
+        // Synchronous deliberately. An async stop is only as good as every
+        // caller remembering to await it, and a process that exits with the
+        // stop still in flight leaves napi calls outstanding and aborts.
+        //
+        // The flag stops later calls; the notify wakes the ones already
+        // parked. Closing the endpoint is not enough on its own, because the
+        // senders feeding these queues need not drop promptly, and a parked
+        // `accept` that never resolves hangs the process rather than letting
+        // it exit. Taking the receiver locks here would be the wrong tool
+        // anyway, since they are held precisely by the calls that need waking.
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.stop_signal.send(true);
     }
 
     /// Resolves with the next incoming session, or null once the server stops.
     #[napi]
     pub async fn accept(&self) -> Option<IncomingSession> {
+        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         let mut rx = self.incoming.lock().await;
-        rx.recv().await.map(|incoming| IncomingSession {
+        let mut stop = self.stop_signal.subscribe();
+        let next = tokio::select! {
+            incoming = rx.recv() => incoming,
+            _ = stop.wait_for(|stopped| *stopped) => None,
+        };
+        next.map(|incoming| IncomingSession {
             path: incoming.path.clone(),
             authority: incoming.authority.clone(),
             headers: incoming

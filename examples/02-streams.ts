@@ -65,5 +65,5 @@ wt.close({ closeCode: 0, reason: "done" });
 const info = await wt.closed;
 console.log(`client: closed (code ${info.closeCode})`);
 
-server.stop();
+await server.stop();
 process.exit(0);
