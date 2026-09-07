@@ -373,7 +373,7 @@ for (const file of [childFile!]) {
   }
 }
 
-server.stop();
+await server.stop();
 
 // The child hands its results to the parent on one line, so a runaway loop
 // that is killed later cannot corrupt them.

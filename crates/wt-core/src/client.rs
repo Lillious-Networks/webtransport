@@ -132,6 +132,9 @@ pub fn client_endpoint(
     )
     .map_err(|e| Error::Io(e.to_string()))?;
     endpoint.set_default_client_config(config);
+    // Closed at module teardown, before napi drops the runtime its driver runs
+    // on; see `crate::shutdown`.
+    crate::shutdown::register(&endpoint);
     Ok(endpoint)
 }
 
@@ -179,6 +182,9 @@ pub fn shared_endpoint(remote: SocketAddr) -> Result<quinn::Endpoint> {
         quinn::default_runtime().expect("no default quinn runtime"),
     )
     .map_err(|e| Error::Io(e.to_string()))?;
+    // Closed at module teardown, before napi drops the runtime its driver runs
+    // on; see `crate::shutdown`.
+    crate::shutdown::register(&endpoint);
     endpoints.insert(key, endpoint.clone());
     Ok(endpoint)
 }

@@ -29,6 +29,17 @@ export declare class WebTransportServer {
    * reported on one.
    */
   nextError(): Promise<string | null>
+  /**
+   * Stops the server: closes the endpoint and ends both queues.
+   *
+   * Both `accept` and `next_error` park on a channel, and a JS `stop()` that
+   * only set a flag left those promises pending for good. That keeps Bun's
+   * event loop alive so the process never exits on its own, and leaves napi
+   * calls outstanding when it is finally torn down, which aborts the
+   * process. Closing the receivers resolves them to null, so the JS loops
+   * end and the runtime can drain.
+   */
+  stop(): Promise<void>
   /** Resolves with the next incoming session, or null once the server stops. */
   accept(): Promise<IncomingSession | null>
 }
@@ -238,6 +249,23 @@ export declare class WtSendStream {
 export declare function connect(url: string, options?: JsClientOptions | undefined | null): Promise<WebTransportSession>
 
 export declare function generateSelfSigned(hostnames: Array<string>): SelfSignedCert
+
+/**
+ * Closes every QUIC endpoint before the runtime that drives them goes away.
+ *
+ * napi owns the Tokio runtime the endpoint drivers run on and shuts it down at
+ * process exit. A driver still live at that moment is dropped mid-flight, and
+ * quinn aborts the process: the run succeeds, then dies with `abort()`, which
+ * a shell reports only as a non-zero exit with nothing pointing at the cause.
+ * The hook runs while the runtime is still up, so drivers finish rather than
+ * being torn out from under themselves.
+ *
+ * Called once by the JS layer as it loads. A `#[module_exports]` hook would
+ * register this without the JS side needing to know, but that macro is behind
+ * napi-rs's compat mode, and the async entry points cannot take an `Env`.
+ * Repeat calls are no-ops.
+ */
+export declare function installExitHook(): void
 
 export interface JsCertHash {
   algorithm: string

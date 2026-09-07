@@ -118,3 +118,9 @@ function load() {
 }
 
 export const native = load();
+
+// Closes the QUIC endpoints before the addon's Tokio runtime is torn down at
+// process exit. Without it a live endpoint driver is dropped mid-flight and
+// quinn aborts the process, which turns a clean run into a non-zero exit with
+// nothing in the output to explain it.
+native.installExitHook();

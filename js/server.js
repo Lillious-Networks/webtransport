@@ -326,6 +326,11 @@ export async function serve(options) {
     },
     stop() {
       stopped = true;
+      // Not just a flag: both loops are parked on `accept()` and
+      // `nextError()`, which resolve only once the addon ends those queues.
+      // Leaving them pending keeps the event loop alive so the process never
+      // exits, and leaves napi calls outstanding at teardown, which aborts it.
+      return server.stop();
     },
   };
 }

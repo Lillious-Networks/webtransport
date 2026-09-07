@@ -17,6 +17,7 @@ pub mod pool;
 pub mod send_scheduler;
 pub mod server;
 pub mod session;
+pub mod shutdown;
 pub mod stream;
 pub mod tls;
 

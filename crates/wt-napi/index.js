@@ -708,3 +708,4 @@ module.exports.WtRecvStream = nativeBinding.WtRecvStream
 module.exports.WtSendStream = nativeBinding.WtSendStream
 module.exports.connect = nativeBinding.connect
 module.exports.generateSelfSigned = nativeBinding.generateSelfSigned
+module.exports.installExitHook = nativeBinding.installExitHook

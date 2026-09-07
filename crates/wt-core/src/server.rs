@@ -119,10 +119,21 @@ impl Server {
             quinn::default_runtime().expect("no default quinn runtime"),
         )
         .map_err(|e| Error::Io(e.to_string()))?;
+        // Closed at module teardown, before napi drops the runtime its driver
+        // runs on; see `crate::shutdown`.
+        crate::shutdown::register(&endpoint);
         Ok(Self {
             endpoint,
             max_sessions: config.max_sessions,
         })
+    }
+
+    /// Stops accepting and closes every live connection.
+    ///
+    /// Peers get a connection close rather than silence, and the endpoint's
+    /// driver retires, which is what lets the host runtime shut down cleanly.
+    pub fn close(&self) {
+        self.endpoint.close(0u32.into(), b"server stopped");
     }
 
     /// The address actually bound, which resolves port 0 to the real port.

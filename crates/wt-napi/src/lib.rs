@@ -17,6 +17,31 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 #[allow(deprecated)]
 use napi::threadsafe_function::ThreadSafeCallContext;
 use napi_derive::napi;
+
+/// Closes every QUIC endpoint before the runtime that drives them goes away.
+///
+/// napi owns the Tokio runtime the endpoint drivers run on and shuts it down at
+/// process exit. A driver still live at that moment is dropped mid-flight, and
+/// quinn aborts the process: the run succeeds, then dies with `abort()`, which
+/// a shell reports only as a non-zero exit with nothing pointing at the cause.
+/// The hook runs while the runtime is still up, so drivers finish rather than
+/// being torn out from under themselves.
+///
+/// Called once by the JS layer as it loads. A `#[module_exports]` hook would
+/// register this without the JS side needing to know, but that macro is behind
+/// napi-rs's compat mode, and the async entry points cannot take an `Env`.
+/// Repeat calls are no-ops.
+#[napi]
+pub fn install_exit_hook(env: &Env) {
+    static REGISTERED: std::sync::Once = std::sync::Once::new();
+    REGISTERED.call_once(|| {
+        // Failing to register is not worth throwing over: the addon still
+        // works, and the cost is only the noisy exit this avoids.
+        let _ = env.add_env_cleanup_hook((), |()| {
+            wt_core::shutdown::close_all();
+        });
+    });
+}
 use std::sync::Arc;
 use wt_core::tls::{CertHash, HashAlgorithm};
 use wt_core::{client, server, CloseInfo, Session, State};
@@ -827,6 +852,21 @@ impl WebTransportServer {
     pub async fn next_error(&self) -> Option<String> {
         let mut rx = self.errors.lock().await;
         rx.recv().await
+    }
+
+    /// Stops the server: closes the endpoint and ends both queues.
+    ///
+    /// Both `accept` and `next_error` park on a channel, and a JS `stop()` that
+    /// only set a flag left those promises pending for good. That keeps Bun's
+    /// event loop alive so the process never exits on its own, and leaves napi
+    /// calls outstanding when it is finally torn down, which aborts the
+    /// process. Closing the receivers resolves them to null, so the JS loops
+    /// end and the runtime can drain.
+    #[napi]
+    pub async fn stop(&self) {
+        self.server.close();
+        self.incoming.lock().await.close();
+        self.errors.lock().await.close();
     }
 
     /// Resolves with the next incoming session, or null once the server stops.

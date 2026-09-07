@@ -56,6 +56,30 @@ async function nextSession(): Promise<any> {
   return accepted.shift();
 }
 
+describe("server shutdown", () => {
+  // `stop()` used to only set a JS flag while the accept loops stayed parked
+  // on addon promises that nothing ever resolved. The process then never
+  // exited on its own, and forcing it aborted with napi calls outstanding: the
+  // suite reported every test passing and the runner still saw a crash. This
+  // asserts the observable half, that stopping actually settles the loops.
+  test("stopping a server settles its accept loops", async () => {
+    const own = await serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      cert,
+      key,
+      session() {},
+    });
+    expect(own.port).toBeGreaterThan(0);
+
+    await own.stop();
+
+    // A stopped server refuses new sessions rather than hanging the caller.
+    const wt = new WebTransport(`https://localhost:${own.port}/`, options());
+    await expect(wt.ready).rejects.toBeInstanceOf(WebTransportError);
+  });
+});
+
 describe("datagram stream teardown", () => {
   test("a cancelled reader does not throw when the session then closes", async () => {
     const wt = new WebTransport(url(), options());
