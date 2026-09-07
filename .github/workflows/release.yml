@@ -26,6 +26,16 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      # A missing token surfaces only at the very end otherwise, after six
+      # cross-platform builds have run, as an ENEEDAUTH from npm publish.
+      - name: Check the npm token is present
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN is not set. Add it under Settings > Secrets and variables > Actions as a repository secret. It must be an npm Automation token: other kinds are refused in CI, where there is no 2FA prompt to answer."
+            exit 1
+          fi
       - id: resolve
         run: |
           set -euo pipefail

@@ -37,7 +37,12 @@ function cargoDirs() {
 /** Candidate locations, most specific first. */
 function candidates() {
   const { platform, arch } = process;
-  const abi = platform === "linux" && isMusl() ? "musl" : platform === "linux" ? "gnu" : null;
+  // The suffix has to match the published prebuild names exactly. Linux
+  // distinguishes its C library, and Windows carries the toolchain: the
+  // release workflow ships wt.win32-x64-msvc.node, so a bare win32-x64 finds
+  // nothing. macOS has no suffix.
+  const abi =
+    platform === "linux" ? (isMusl() ? "musl" : "gnu") : platform === "win32" ? "msvc" : null;
   const triple = abi ? `${platform}-${arch}-${abi}` : `${platform}-${arch}`;
 
   return [
