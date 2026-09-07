@@ -199,7 +199,6 @@ impl Drop for Server {
     }
 }
 
-
 /// Drives one QUIC connection, emitting the WebTransport sessions on it.
 async fn serve_connection(
     incoming: quinn::Incoming,

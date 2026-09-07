@@ -456,6 +456,14 @@ describe("waitUntilAvailable", () => {
       // successful opens above already prove.
       expect(open.length).toBeGreaterThan(0);
     }
+
+    // Thousands of streams and the transport itself are addon handles with
+    // work still pending on them. Abandoning that many at process exit is
+    // what turns a passing run into an abort, so this closes them rather
+    // than leaving the teardown to chance.
+    await Promise.all(open.map((stream) => stream.close().catch(() => {})));
+    wt.close();
+    await wt.closed;
   }, 60000);
 
   test("true is the default and opens a usable stream", async () => {
