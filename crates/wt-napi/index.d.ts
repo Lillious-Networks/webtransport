@@ -245,39 +245,10 @@ export declare class WtSendStream {
   setSendOrder(sendOrder?: bigint | undefined | null): void
 }
 
-/**
- * Closes every QUIC endpoint, then blocks briefly while the runtime settles
- * the fallout: parked `accept`s, `read`s and `closed` waiters complete and
- * their promises resolve before the environment goes away.
- *
- * Called synchronously from the JS `exit` event, which fires before teardown
- * begins. Blocking there is safe, since nothing else needs the JS thread, and it
- * is exactly what lets everything parked on the endpoints drain in time,
- * rather than being torn down mid-flight.
- *
- * The wait is bounded and only paid when there was something to close.
- */
-export declare function closeAllEndpoints(): void
-
 /** Opens a WebTransport session. Resolves once the session is established. */
 export declare function connect(url: string, options?: JsClientOptions | undefined | null): Promise<WebTransportSession>
 
 export declare function generateSelfSigned(hostnames: Array<string>): SelfSignedCert
-
-/**
- * Closes every QUIC endpoint before the runtime that drives them goes away.
- *
- * napi owns the Tokio runtime the endpoint drivers run on and shuts it down
- * at process exit. A driver still live at that moment is dropped mid-flight
- * and the process aborts: the run succeeds, then dies, which a shell reports
- * only as a non-zero exit with nothing pointing at the cause.
- *
- * Called once by the JS layer as it loads. A `#[module_exports]` hook would
- * register this without the JS side knowing, but that macro sits behind
- * napi-rs's compat mode and the async entry points cannot take an `Env`.
- * Repeat calls are no-ops.
- */
-export declare function installExitHook(): void
 
 export interface JsCertHash {
   algorithm: string

@@ -706,7 +706,5 @@ module.exports.WebTransportSession = nativeBinding.WebTransportSession
 module.exports.WtBidiStream = nativeBinding.WtBidiStream
 module.exports.WtRecvStream = nativeBinding.WtRecvStream
 module.exports.WtSendStream = nativeBinding.WtSendStream
-module.exports.closeAllEndpoints = nativeBinding.closeAllEndpoints
 module.exports.connect = nativeBinding.connect
 module.exports.generateSelfSigned = nativeBinding.generateSelfSigned
-module.exports.installExitHook = nativeBinding.installExitHook

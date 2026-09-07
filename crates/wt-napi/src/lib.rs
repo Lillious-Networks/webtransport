@@ -18,44 +18,6 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::threadsafe_function::ThreadSafeCallContext;
 use napi_derive::napi;
 
-/// Closes every QUIC endpoint before the runtime that drives them goes away.
-///
-/// napi owns the Tokio runtime the endpoint drivers run on and shuts it down
-/// at process exit. A driver still live at that moment is dropped mid-flight
-/// and the process aborts: the run succeeds, then dies, which a shell reports
-/// only as a non-zero exit with nothing pointing at the cause.
-///
-/// Called once by the JS layer as it loads. A `#[module_exports]` hook would
-/// register this without the JS side knowing, but that macro sits behind
-/// napi-rs's compat mode and the async entry points cannot take an `Env`.
-/// Repeat calls are no-ops.
-#[napi]
-pub fn install_exit_hook(env: &Env) {
-    static REGISTERED: std::sync::Once = std::sync::Once::new();
-    REGISTERED.call_once(|| {
-        // Failing to register is not worth throwing over: the addon still
-        // works, and the cost is only the noisy exit this avoids.
-        let _ = env.add_env_cleanup_hook((), |()| {
-            wt_core::shutdown::close_all();
-        });
-    });
-}
-
-/// Closes every QUIC endpoint, then blocks briefly while the runtime settles
-/// the fallout: parked `accept`s, `read`s and `closed` waiters complete and
-/// their promises resolve before the environment goes away.
-///
-/// Called synchronously from the JS `exit` event, which fires before teardown
-/// begins. Blocking there is safe, since nothing else needs the JS thread, and it
-/// is exactly what lets everything parked on the endpoints drain in time,
-/// rather than being torn down mid-flight.
-///
-/// The wait is bounded and only paid when there was something to close.
-#[napi]
-pub fn close_all_endpoints() {
-    wt_core::shutdown::close_all_and_settle();
-}
-
 use std::sync::Arc;
 use wt_core::tls::{CertHash, HashAlgorithm};
 use wt_core::{client, server, CloseInfo, Session, State};

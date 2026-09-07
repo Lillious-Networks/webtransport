@@ -119,9 +119,6 @@ impl Server {
             quinn::default_runtime().expect("no default quinn runtime"),
         )
         .map_err(|e| Error::Io(e.to_string()))?;
-        // Closed at module teardown, before napi drops the runtime its driver
-        // runs on; see `crate::shutdown`.
-        crate::shutdown::register(&endpoint);
         Ok(Self {
             endpoint,
             max_sessions: config.max_sessions,
