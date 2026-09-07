@@ -2,12 +2,14 @@
  * Chromium interop check.
  *
  * Serves a WebTransport endpoint plus a plain HTTP page that drives a real
- * Chrome WebTransport client against it, and reports what the browser saw.
+ * browser's WebTransport client against it, and reports what it saw.
  *
  *   bun examples/04-chrome-interop.ts
  *
- * Then open http://127.0.0.1:8099/ in Chrome. The page reports back to this
- * process, so the result appears in this terminal as well as on the page.
+ * Then open http://127.0.0.1:8099/ in whichever browser you are checking.
+ * The page reports back to this process, so the result appears in this
+ * terminal as well as on the page, labelled with the browser that sent it.
+ * Several browsers can report in one run, and each keeps its own verdict.
  *
  * This exists because our own client cannot catch browser-facing bugs: both
  * ends share our assumptions. A browser exercises QPACK Huffman coding, the
@@ -24,7 +26,12 @@ const { cert, key, hash } = generateSelfSigned(["localhost", "127.0.0.1"]);
 const WT_PORT = 4433;
 const PAGE_PORT = 8099;
 
-let passed = false;
+/// What each browser reported, keyed by the name derived from its user agent.
+///
+/// Per browser rather than one flag: a later PASS used to overwrite an earlier
+/// FAIL, so the summary reflected whichever browser reported last and a real
+/// failure could read as green.
+const results = new Map<string, "pass" | "fail">();
 
 const wtServer = await serve({
   port: WT_PORT,
@@ -86,7 +93,14 @@ const log = (m) => {
     log("ready: handshake succeeded");
     log("reliability: " + wt.reliability);
 
-    const dw = wt.datagrams.writable.getWriter();
+    // The CR replaced \`datagrams.writable\` with \`createWritable()\`, and
+    // browsers are at different points in that move, so take whichever the
+    // one under test offers.
+    const datagramsWritable =
+      typeof wt.datagrams.createWritable === "function"
+        ? wt.datagrams.createWritable()
+        : wt.datagrams.writable;
+    const dw = datagramsWritable.getWriter();
     await dw.write(new TextEncoder().encode("ping"));
     log("sent datagram");
 
@@ -96,7 +110,7 @@ const log = (m) => {
 
     const s = await wt.createUnidirectionalStream();
     const w = s.getWriter();
-    await w.write(new TextEncoder().encode("hello from chrome"));
+    await w.write(new TextEncoder().encode("hello from the browser"));
     await w.close();
     log("sent stream");
 
@@ -108,18 +122,42 @@ const log = (m) => {
 </script>
 `;
 
+/// Names the browser from its user agent, for labelling its output.
+///
+/// Order matters: Edge and Chrome both claim "Chrome", and every WebKit
+/// browser carries "Safari", so the more specific tokens are tested first.
+function browserName(userAgent: string): string {
+  if (userAgent.includes("Firefox/")) return "firefox";
+  if (userAgent.includes("Edg/")) return "edge";
+  if (userAgent.includes("Chrome/")) return "chrome";
+  if (userAgent.includes("Safari/")) return "safari";
+  return "browser";
+}
+
 Bun.serve({
   port: PAGE_PORT,
   async fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === "/report") {
       const message = await req.text();
-      console.log(`chrome: ${message}`);
-      if (message === "PASS") passed = true;
-      if (message.startsWith("FAIL")) {
-        console.log("\ninterop FAILED");
+      const name = browserName(req.headers.get("user-agent") ?? "");
+      console.log(`${name}: ${message}`);
+
+      if (message === "PASS") results.set(name, "pass");
+      if (message.startsWith("FAIL")) results.set(name, "fail");
+
+      // Summarised only when a browser reaches a verdict, and never
+      // downgraded: a browser that failed stays failed however many others
+      // pass afterwards.
+      if (message === "PASS" || message.startsWith("FAIL")) {
+        const summary = [...results]
+          .map(([browser, outcome]) => `${browser} ${outcome.toUpperCase()}`)
+          .join(", ");
+        const failed = [...results.values()].includes("fail");
+        console.log(`
+interop ${failed ? "FAILED" : "PASSED"}: ${summary}
+`);
       }
-      if (passed) console.log("\ninterop PASSED");
       return new Response("ok");
     }
     return new Response(page, { headers: { "content-type": "text/html" } });
@@ -127,6 +165,6 @@ Bun.serve({
 });
 
 console.log(`WebTransport server on https://127.0.0.1:${WT_PORT}`);
-console.log(`\nOpen this in Chrome:  http://127.0.0.1:${PAGE_PORT}/\n`);
-console.log("Chrome needs no flags: the page pins the certificate by hash.");
+console.log(`\nOpen this in a browser:  http://127.0.0.1:${PAGE_PORT}/\n`);
+console.log("No flags needed: the page pins the certificate by hash.");
 console.log("Press Ctrl+C when done.\n");
