@@ -113,15 +113,31 @@ jobs:
             --target ${{ matrix.rust_target }}
       # The loader looks for wt.<triple>.node at the package root, so name the
       # artifact exactly that rather than relying on napi's own suffix.
+      #
+      # napi writes beside the manifest, in crates/wt-napi, not at the repo
+      # root, and it appends its own platform suffix when given --target. The
+      # search covers both that name and the unsuffixed one, and is rooted at
+      # the crate directory so a stale wt.node left at the repo root by a local
+      # build cannot be picked up instead.
       - name: Stage prebuild
         run: |
           set -euo pipefail
           mkdir -p prebuilds
-          SRC="$(find . -maxdepth 2 -name 'wt*.node' -not -path './prebuilds/*' | head -1)"
+          SRC=""
+          for candidate in             "crates/wt-napi/wt.${{ matrix.triple }}.node"             "crates/wt-napi/wt.node"; do
+            if [ -f "${candidate}" ]; then
+              SRC="${candidate}"
+              break
+            fi
+          done
           if [ -z "${SRC}" ]; then
             echo "::error::No .node artifact was produced for ${{ matrix.triple }}."
+            echo "Looked for crates/wt-napi/wt.${{ matrix.triple }}.node and crates/wt-napi/wt.node."
+            echo "Files present under crates/wt-napi:"
+            ls -la crates/wt-napi || true
             exit 1
           fi
+          echo "Staging ${SRC} as wt.${{ matrix.triple }}.node"
           cp "${SRC}" "prebuilds/wt.${{ matrix.triple }}.node"
       - uses: actions/upload-artifact@v4
         with:
