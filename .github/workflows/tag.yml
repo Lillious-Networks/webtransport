@@ -39,6 +39,7 @@ jobs:
         if: steps.resolve.outputs.bump == 'true'
         env:
           TAG: ${{ steps.resolve.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if git ls-remote --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
