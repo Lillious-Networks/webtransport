@@ -1,12 +1,33 @@
 # CI: lint, type-check, and run both test suites on every push and PR.
-# A push that only bumps package.json is skipped; the tag workflow turns it
-# into a release instead.
+# Skipped when a push or PR touches only housekeeping files: docs, examples,
+# benchmarks, git hooks, workflow definitions, or a bare version bump.
 name: test
 on:
   push:
     branches: [main]
-    paths-ignore: ["package.json"]
+    paths-ignore:
+      - "package.json"
+      - "README.md"
+      - "LICENSE"
+      - ".github/**"
+      - ".husky/**"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".npmignore"
+      - "bench/**"
+      - "examples/**"
   pull_request:
+    paths-ignore:
+      - "package.json"
+      - "README.md"
+      - "LICENSE"
+      - ".github/**"
+      - ".husky/**"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".npmignore"
+      - "bench/**"
+      - "examples/**"
   workflow_dispatch:
 
 concurrency:

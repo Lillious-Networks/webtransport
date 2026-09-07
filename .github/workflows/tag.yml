@@ -1,7 +1,8 @@
 # Version tag: when a push to main bumps the package.json version, tag the
 # commit v<version> and dispatch the release workflow for that tag. Commits
 # that change package.json without bumping the version do nothing, so merging
-# a PR that only edits scripts cannot publish.
+# a PR that only edits scripts cannot publish. Can also be run manually via
+# workflow_dispatch, which skips the bump check.
 #
 # The tag is created through the refs API rather than a git push so that no
 # push event fires twice, and the release is started explicitly with a
@@ -11,6 +12,7 @@ on:
   push:
     branches: [main]
     paths: ["package.json"]
+  workflow_dispatch:
 
 jobs:
   tag:
@@ -26,12 +28,17 @@ jobs:
         run: |
           set -euo pipefail
           NEW="$(node -p "require('./package.json').version")"
-          OLD="$(git show "HEAD^:package.json" 2>/dev/null \
-            | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || true)"
-          if [ "${OLD}" = "${NEW}" ]; then
-            echo "package.json changed but the version was not bumped; no tag."
-            echo "bump=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          # A manual dispatch is explicit intent, so it skips the bump check
+          # that guards automatic pushes: otherwise a rerun after the bump
+          # commit would always read OLD == NEW and do nothing.
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            OLD="$(git show "HEAD^:package.json" 2>/dev/null \
+              | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || true)"
+            if [ "${OLD}" = "${NEW}" ]; then
+              echo "package.json changed but the version was not bumped; no tag."
+              echo "bump=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
           echo "bump=true" >> "$GITHUB_OUTPUT"
           echo "tag=v${NEW}" >> "$GITHUB_OUTPUT"
