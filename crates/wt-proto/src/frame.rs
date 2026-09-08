@@ -83,10 +83,8 @@ impl Frame {
                     // Draft §5.5 makes the codepoint itself the version
                     // negotiation: a peer offering several drafts sends the
                     // setting once per draft, and the client picks one it
-                    // knows. Advertising the union of every codepoint in the
-                    // field costs one setting each and lets every browser
-                    // find a version it speaks; the wire format is unchanged
-                    // across these drafts for everything we implement.
+                    // knows. We advertise exactly the set wtransport sends,
+                    // which is the set measured to work with every browser:
                     //
                     // * draft-02: a boolean enable flag to quiche (Chromium
                     //   and derivatives) and the only codepoint Firefox's
@@ -96,18 +94,19 @@ impl Frame {
                     put(settings::WT_MAX_SESSIONS_DRAFT02, 1)?;
                     // * draft-07: what wtransport advertises, and the only
                     //   WebTransport codepoint besides draft-02 that a
-                    //   Safari-interoperable server is known to send. Safari
-                    //   ignores the draft-13 spelling below, so without this
-                    //   it reads the connection as offering no sessions.
+                    //   Safari-interoperable server is known to send.
+                    //
+                    // Neither the draft-13 spelling (0x14e9cd29) nor
+                    // SETTINGS_WT_ENABLED is advertised. Sending the
+                    // draft-13 spelling negotiates draft-13 semantics, which
+                    // turns on session-level flow control: Safari then
+                    // enforces a zero opening window it will not let us
+                    // raise — measured on iOS, with those codepoints present
+                    // the session either aborts before CONNECT or stalls
+                    // with no stream ever opened. On the draft-02/draft-07
+                    // set alone Safari negotiates draft-07, runs no
+                    // session-level flow control, and opens streams freely.
                     put(settings::WT_MAX_SESSIONS_DRAFT07, s.wt_max_sessions)?;
-                    // * final SETTINGS_WT_ENABLED: required by quic-go
-                    //   clients.
-                    // * draft-13 and SETTINGS_WT_ENABLED: what quic-go and
-                    //   current Chromium read, and Safari sends both too.
-                    if s.wt_enabled {
-                        put(settings::WT_ENABLED, 1)?;
-                    }
-                    put(settings::WT_MAX_SESSIONS_DRAFT13, s.wt_max_sessions)?;
                 }
                 if s.wt_initial_max_data > 0 {
                     put(settings::WT_INITIAL_MAX_DATA, s.wt_initial_max_data)?;
@@ -215,7 +214,7 @@ mod tests {
         };
         assert!(decoded.accepts_webtransport());
         assert!(decoded.supports_datagrams());
-        assert_eq!(decoded.wt_max_sessions, 16);
+        assert_eq!(decoded.wt_max_sessions, 1);
     }
 
     #[test]
@@ -322,11 +321,11 @@ mod tests {
     }
 
     /// The advertised set must not carry the session-level flow-control
-    /// credits. Advertising one promises draft-13 flow control we do not run,
-    /// and Safari on iOS refuses the session over it: measured, the session
-    /// fails before `ready` with the credits present at any value and
-    /// succeeds with all three absent. Re-add them only alongside the
-    /// WT_MAX_DATA and WT_MAX_STREAMS capsules.
+    /// credits. A non-zero credit is what Safari rejects: measured on iOS,
+    /// the peer closes the connection (H3_NO_ERROR) the moment it sees the
+    /// SETTINGS, before it has sent CONNECT. The credit is instead granted
+    /// per session with the WT_MAX_DATA and WT_MAX_STREAMS capsules, which
+    /// is the pattern draft §9.2's zero default describes.
     #[test]
     fn flow_control_credits_are_not_advertised() {
         let mut buf = BytesMut::new();
@@ -350,11 +349,14 @@ mod tests {
         }
     }
 
-    /// The advertised SETTINGS must carry every draft codepoint for the
-    /// session limit, since the codepoint is the version negotiation and a
+    /// The advertised SETTINGS carry exactly the two draft codepoints that
+    /// wtransport sends, since the codepoint is the version negotiation and a
     /// browser that recognises none of them reads the server as offering no
-    /// sessions. Safari reads only draft-07 and Firefox only draft-02, so
-    /// dropping any one of these silently loses a browser.
+    /// sessions. Safari reads only draft-07 and Firefox only draft-02. The
+    /// draft-13 spelling and SETTINGS_WT_ENABLED are deliberately absent:
+    /// advertising the draft-13 codepoint switches Safari into draft-13
+    /// session-level flow control, which then stalls — it will neither use a
+    /// zero opening window nor accept the capsules that would raise it.
     #[test]
     fn every_draft_codepoint_for_the_session_limit_is_advertised() {
         let mut buf = BytesMut::new();
@@ -375,10 +377,11 @@ mod tests {
         for id in [
             settings::WT_MAX_SESSIONS_DRAFT02,
             settings::WT_MAX_SESSIONS_DRAFT07,
-            settings::WT_MAX_SESSIONS_DRAFT13,
-            settings::WT_ENABLED,
         ] {
             assert!(ids.contains(&id), "missing codepoint {id:#x}");
+        }
+        for id in [settings::WT_MAX_SESSIONS_DRAFT13, settings::WT_ENABLED] {
+            assert!(!ids.contains(&id), "must not advertise {id:#x}");
         }
     }
 }

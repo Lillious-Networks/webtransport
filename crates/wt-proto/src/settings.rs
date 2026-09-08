@@ -8,19 +8,32 @@
 //!
 //! The setting's codepoint changed across drafts, and each codepoint doubles
 //! as version negotiation: a peer sends the setting once per draft it speaks
-//! and the other end picks a codepoint it recognises. We advertise the union
-//! of every codepoint in the field, since the wire format is unchanged across
-//! them for everything we implement and an extra setting costs one varint
-//! pair:
+//! and the other end picks a codepoint it recognises. We advertise exactly
+//! the set wtransport sends, which is the set measured to work with every
+//! browser:
 //!
 //! * draft-02 for Firefox, whose Neqo knows no other, and for quiche.
-//! * draft-07 and draft-13 for Safari, which sends both.
-//! * `SETTINGS_WT_ENABLED` and draft-13 for quic-go and current Chromium.
+//! * draft-07, which Safari negotiates when no newer codepoint is offered.
 //!
-//! The three `WT_INITIAL_MAX_*` limits are deliberately not advertised.
-//! Sending one is a promise to run draft-13 session-level flow control, which
-//! we do not implement: a peer that believes the window is being maintained
-//! stalls when it is not. Safari refuses the session outright.
+//! Both are advertised with the value 1, whatever the server's real session
+//! capacity. A larger value switches Safari into draft-13 session-level
+//! flow control, which then stalls every session: it enforces the zero
+//! opening window the flow-control SETTINGS imply and ignores the capsules
+//! that would raise it. This is the wtransport-proven set, sent with the
+//! wtransport-proven values.
+//!
+//! The draft-13 spelling (0x14e9cd29) and `SETTINGS_WT_ENABLED` are parsed
+//! but not advertised. Advertising the draft-13 codepoint switches Safari
+//! into draft-13 semantics, where session-level flow control applies: it
+//! then enforces a zero opening window that it will not let us raise with
+//! the flow-control capsules, so the session stalls before any stream
+//! arrives. On draft-07 alone Safari runs no session-level flow control and
+//! opens streams freely.
+//!
+//! The three `WT_INITIAL_MAX_*` limits are also deliberately zero, which
+//! suppresses them on the wire. Measured on Safari/iOS: advertising any of
+//! them non-zero makes the peer close the connection the moment it sees our
+//! SETTINGS, before it has sent CONNECT (H3_NO_ERROR).
 
 /// RFC 9204: the dynamic table capacity we permit a peer to use.
 ///
@@ -57,9 +70,9 @@ pub const WT_ENABLED: u64 = 0x2c7c_f000;
 pub const WT_MAX_SESSIONS_DRAFT02: u64 = 0x2b60_3742;
 /// draft-13 spelling of `SETTINGS_WT_MAX_SESSIONS`.
 ///
-/// What quic-go and current Chromium read. Safari sends it too, so advertising
-/// it is safe; what Safari refuses is the flow-control credit that draft-13
-/// would then have us maintain, not this codepoint.
+/// Parsed but not advertised: advertising it negotiates draft-13 semantics,
+/// under which Safari runs session-level flow control that it then refuses
+/// to let us satisfy, stalling every session. See the module docs.
 pub const WT_MAX_SESSIONS_DRAFT13: u64 = 0x14e9_cd29;
 /// draft §9.2: initial session-level flow-control limit.
 pub const WT_INITIAL_MAX_DATA: u64 = 0x2b61;
@@ -97,22 +110,27 @@ pub struct Settings {
 
 impl Settings {
     /// Settings a WebTransport endpoint advertises.
-    pub fn advertised(max_sessions: u64) -> Self {
+    ///
+    /// The session limit is advertised as 1, exactly what wtransport sends,
+    /// whatever the server's own capacity (`max_sessions`, used only for its
+    /// bookkeeping). A value greater than 1 is what switches Safari into
+    /// session-level flow control: measured on iOS, any larger value makes
+    /// Safari run its draft-13 flow control, and since it will neither use a
+    /// zero opening window nor accept the capsules that would raise it, every
+    /// session stalls before the first stream arrives. With 1, flow control
+    /// is off and Safari opens streams freely.
+    pub fn advertised(_max_sessions: u64) -> Self {
         Self {
             enable_connect_protocol: true,
             h3_datagram: true,
             wt_enabled: true,
-            wt_max_sessions: max_sessions,
-            // Deliberately zero, which suppresses them: advertising a credit
-            // is a promise to run draft-13 session-level flow control, and we
-            // do not yet send the WT_MAX_DATA and WT_MAX_STREAMS capsules
-            // that keep a peer's window open. Safari takes the promise at
-            // face value and the session then stalls. Measured on iOS: with
-            // any of these present the session fails before `ready`, at 2^60
-            // and at ordinary values alike; with all three absent it
-            // connects, and it connects whether or not the draft-13 and
-            // WT_ENABLED codepoints are also advertised. Restore them in the
-            // same change that implements the capsules, not before.
+            wt_max_sessions: 1,
+            // Deliberately zero, which suppresses them on the wire: the
+            // credit is granted per session with WT_MAX_DATA and
+            // WT_MAX_STREAMS capsules once a session is established. A
+            // non-zero value here does not survive Safari: measured on iOS,
+            // the peer closes the connection (H3_NO_ERROR) as soon as it
+            // sees the SETTINGS, before sending CONNECT, at any value.
             wt_initial_max_data: 0,
             wt_initial_max_streams_uni: 0,
             wt_initial_max_streams_bidi: 0,
@@ -275,11 +293,16 @@ mod tests {
         assert!(s.accepts_webtransport());
         assert!(s.supports_datagrams());
         assert!(s.wt_enabled);
-        assert_eq!(s.wt_max_sessions, 16);
-        // The opposite of what this once asserted, and the reason is worth
-        // keeping: advertising a session-level credit promises draft-13 flow
-        // control we do not run, and Safari refuses the session for it. These
-        // stay zero until the WT_MAX_DATA and WT_MAX_STREAMS capsules exist.
+        // The session limit is advertised as 1 whatever the server's real
+        // capacity: any larger value switches Safari into session-level flow
+        // control, which then stalls every session. This is the value
+        // wtransport sends, and the value every browser has been measured to
+        // work with.
+        assert_eq!(s.wt_max_sessions, 1);
+        // Deliberately zero: advertising a credit makes Safari close the
+        // connection the moment it sees our SETTINGS, before sending CONNECT.
+        // The credit is granted per session with the WT_MAX_DATA and
+        // WT_MAX_STREAMS capsules instead.
         assert_eq!(s.wt_initial_max_data, 0);
         assert_eq!(s.wt_initial_max_streams_uni, 0);
         assert_eq!(s.wt_initial_max_streams_bidi, 0);

@@ -211,26 +211,8 @@ async fn serve_connection(
     // Announce WebTransport support before anything else: a client must see
     // our SETTINGS before it may open a session (draft §4.5).
     let advertised = Settings::advertised(max_sessions);
-    tracing::debug!(
-        ?advertised,
-        supports_datagrams,
-        max_datagram_size = ?quic.max_datagram_size(),
-        "advertising SETTINGS",
-    );
     let control = h3::open_control_stream(&quic, advertised).await?;
     let qpack = h3::open_qpack_streams(&quic).await?;
-
-    // A peer that refuses our SETTINGS closes the connection instead of
-    // sending CONNECT, and its error code is the only thing that says why.
-    // Without this the refusal is indistinguishable from the client simply
-    // going away.
-    {
-        let quic = quic.clone();
-        tokio::spawn(async move {
-            let reason = quic.closed().await;
-            tracing::debug!(%reason, "connection closed");
-        });
-    }
 
     let connection = Connection::new(quic.clone());
 
@@ -291,16 +273,10 @@ async fn serve_connection(
                 continue;
             }
         };
-        tracing::debug!(?fields, "CONNECT request");
 
         let is_webtransport = h3::field(&fields, ":method") == Some("CONNECT")
             && h3::field(&fields, ":protocol") == Some("webtransport");
         if !is_webtransport {
-            tracing::debug!(
-                method = ?h3::field(&fields, ":method"),
-                protocol = ?h3::field(&fields, ":protocol"),
-                "not a WebTransport CONNECT, answering 501",
-            );
             let response = vec![(":status".to_owned(), "501".to_owned())];
             let _ = h3::write_headers(&mut send, &response).await;
             continue;
@@ -357,11 +333,17 @@ async fn serve_connection(
             connection.registry().remove(session_id);
             continue;
         }
-        tracing::debug!(session_id, "session established");
 
         // The session owns its CONNECT stream: its lifetime is the session's,
         // and close and drain put their capsules on it.
         session.attach_connect_stream(send).await;
+        // No flow-control capsules follow the 2xx. wtransport sends none, and
+        // byte-for-byte parity with the one server measured to work with
+        // Safari is the goal: the advertised session limit of 1 keeps flow
+        // control off for every peer, so the capsules would be inert even for
+        // a peer that knows them. They remain available as
+        // `Session::grant_flow_control` for a day when flow control is
+        // actually negotiated.
         tokio::spawn(crate::capsules::watch_connect_stream(
             recv,
             session.clone(),

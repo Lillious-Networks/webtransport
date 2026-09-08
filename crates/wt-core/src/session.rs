@@ -473,6 +473,33 @@ impl Session {
         let _ = stream.flush().await;
     }
 
+    /// Grants the peer session-level flow-control credit.
+    ///
+    /// A peer that negotiated draft-13 runs session-level flow control and
+    /// will not open a stream it has no credit for. The SETTINGS give only the
+    /// opening window, which we advertise as zero (a non-zero value makes
+    /// Safari abort the connection before its CONNECT), so these capsules are
+    /// how a peer gets any credit at all.
+    ///
+    /// We do not enforce a limit in the other direction, so the values are a
+    /// ceiling rather than an accounting position, and there is no need to
+    /// re-send as the peer spends them until it approaches the limit.
+    pub async fn grant_flow_control(&self, max_data: u64, max_streams: u64) {
+        use wt_proto::capsule::Dir;
+        self.send_capsule(&wt_proto::Capsule::MaxData { max: max_data })
+            .await;
+        self.send_capsule(&wt_proto::Capsule::MaxStreams {
+            dir: Dir::Bi,
+            max: max_streams,
+        })
+        .await;
+        self.send_capsule(&wt_proto::Capsule::MaxStreams {
+            dir: Dir::Uni,
+            max: max_streams,
+        })
+        .await;
+    }
+
     /// The scheduler arbitrating this session's send streams.
     pub fn scheduler(&self) -> Arc<crate::SendScheduler> {
         self.inner.scheduler.clone()
