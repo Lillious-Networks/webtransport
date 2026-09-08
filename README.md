@@ -3,7 +3,7 @@
 W3C [WebTransport](https://www.w3.org/TR/webtransport/) for [Bun](https://bun.sh),
 backed by a Rust QUIC/HTTP-3 stack (quinn + rustls) through a napi-rs addon.
 
-Client and server, datagrams and streams, over HTTP/3. Verified against Chrome.
+Client and server, datagrams and streams, over HTTP/3. Verified against Chrome, Firefox, and Safari (desktop and iOS).
 
 - Implements the W3C Candidate Recommendation surface, including `sendGroup` /
   `sendOrder` scheduling, `WebTransportWriter`, `exportKeyingMaterial`, and
