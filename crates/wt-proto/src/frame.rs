@@ -80,9 +80,13 @@ impl Frame {
                     put(settings::H3_DATAGRAM, 1)?;
                 }
                 if s.wt_max_sessions > 0 {
-                    // This is the SETTINGS set quic-go ships and the one
-                    // Safari's iOS path was tested against. Each codepoint
-                    // covers a different peer:
+                    // Draft §5.5 makes the codepoint itself the version
+                    // negotiation: a peer offering several drafts sends the
+                    // setting once per draft, and the client picks one it
+                    // knows. Advertising the union of every codepoint in the
+                    // field costs one setting each and lets every browser
+                    // find a version it speaks; the wire format is unchanged
+                    // across these drafts for everything we implement.
                     //
                     // * draft-02: a boolean enable flag to quiche (Chromium
                     //   and derivatives) and the only codepoint Firefox's
@@ -90,14 +94,19 @@ impl Frame {
                     //   empty version intersection and the session fails
                     //   with ERR_METHOD_NOT_SUPPORTED.
                     put(settings::WT_MAX_SESSIONS_DRAFT02, 1)?;
+                    // * draft-07: what wtransport advertises, and the only
+                    //   WebTransport codepoint besides draft-02 that a
+                    //   Safari-interoperable server is known to send. Safari
+                    //   ignores the draft-13 spelling below, so without this
+                    //   it reads the connection as offering no sessions.
+                    put(settings::WT_MAX_SESSIONS_DRAFT07, s.wt_max_sessions)?;
                     // * final SETTINGS_WT_ENABLED: required by quic-go
                     //   clients.
+                    // * draft-13 and SETTINGS_WT_ENABLED: what quic-go and
+                    //   current Chromium read, and Safari sends both too.
                     if s.wt_enabled {
                         put(settings::WT_ENABLED, 1)?;
                     }
-                    // * draft-13 SETTINGS_WT_MAX_SESSIONS: the codepoint
-                    //   Safari's iOS path reads; it refuses the session
-                    //   before CONNECT when this is absent.
                     put(settings::WT_MAX_SESSIONS_DRAFT13, s.wt_max_sessions)?;
                 }
                 if s.wt_initial_max_data > 0 {
@@ -310,5 +319,66 @@ mod tests {
             Frame::decode(&mut bytes),
             Err(FrameError::MalformedSettings)
         );
+    }
+
+    /// The advertised set must not carry the session-level flow-control
+    /// credits. Advertising one promises draft-13 flow control we do not run,
+    /// and Safari on iOS refuses the session over it: measured, the session
+    /// fails before `ready` with the credits present at any value and
+    /// succeeds with all three absent. Re-add them only alongside the
+    /// WT_MAX_DATA and WT_MAX_STREAMS capsules.
+    #[test]
+    fn flow_control_credits_are_not_advertised() {
+        let mut buf = BytesMut::new();
+        Frame::Settings(Settings::advertised(16))
+            .encode(&mut buf)
+            .unwrap();
+        let mut body = buf.freeze();
+        let _ = varint::decode(&mut body).unwrap();
+        let _ = varint::decode(&mut body).unwrap();
+        let mut ids = Vec::new();
+        while body.has_remaining() {
+            ids.push(varint::decode(&mut body).unwrap());
+            let _ = varint::decode(&mut body).unwrap();
+        }
+        for id in [
+            settings::WT_INITIAL_MAX_DATA,
+            settings::WT_INITIAL_MAX_STREAMS_UNI,
+            settings::WT_INITIAL_MAX_STREAMS_BIDI,
+        ] {
+            assert!(!ids.contains(&id), "must not advertise {id:#x}");
+        }
+    }
+
+    /// The advertised SETTINGS must carry every draft codepoint for the
+    /// session limit, since the codepoint is the version negotiation and a
+    /// browser that recognises none of them reads the server as offering no
+    /// sessions. Safari reads only draft-07 and Firefox only draft-02, so
+    /// dropping any one of these silently loses a browser.
+    #[test]
+    fn every_draft_codepoint_for_the_session_limit_is_advertised() {
+        let mut buf = BytesMut::new();
+        Frame::Settings(Settings::advertised(4))
+            .encode(&mut buf)
+            .unwrap();
+        let mut body = buf.freeze();
+        // Decoding folds every spelling into one field, so walk the payload
+        // directly to see which identifiers actually went on the wire.
+        assert_eq!(varint::decode(&mut body).unwrap(), frame_type::SETTINGS);
+        let len = varint::decode(&mut body).unwrap();
+        assert_eq!(len as usize, body.remaining());
+        let mut ids = Vec::new();
+        while body.has_remaining() {
+            ids.push(varint::decode(&mut body).unwrap());
+            let _ = varint::decode(&mut body).unwrap();
+        }
+        for id in [
+            settings::WT_MAX_SESSIONS_DRAFT02,
+            settings::WT_MAX_SESSIONS_DRAFT07,
+            settings::WT_MAX_SESSIONS_DRAFT13,
+            settings::WT_ENABLED,
+        ] {
+            assert!(ids.contains(&id), "missing codepoint {id:#x}");
+        }
     }
 }

@@ -210,8 +210,27 @@ async fn serve_connection(
 
     // Announce WebTransport support before anything else: a client must see
     // our SETTINGS before it may open a session (draft §4.5).
-    let control = h3::open_control_stream(&quic, Settings::advertised(max_sessions)).await?;
+    let advertised = Settings::advertised(max_sessions);
+    tracing::debug!(
+        ?advertised,
+        supports_datagrams,
+        max_datagram_size = ?quic.max_datagram_size(),
+        "advertising SETTINGS",
+    );
+    let control = h3::open_control_stream(&quic, advertised).await?;
     let qpack = h3::open_qpack_streams(&quic).await?;
+
+    // A peer that refuses our SETTINGS closes the connection instead of
+    // sending CONNECT, and its error code is the only thing that says why.
+    // Without this the refusal is indistinguishable from the client simply
+    // going away.
+    {
+        let quic = quic.clone();
+        tokio::spawn(async move {
+            let reason = quic.closed().await;
+            tracing::debug!(%reason, "connection closed");
+        });
+    }
 
     let connection = Connection::new(quic.clone());
 
@@ -246,6 +265,7 @@ async fn serve_connection(
     // either, since final-spec clients may send none of them, and the draft
     // only has us wait for the client's SETTINGS to arrive (§3.1).
     if !client_settings.h3_datagram {
+        tracing::debug!("closing: client SETTINGS lack H3_DATAGRAM");
         quic.close(0u32.into(), b"client does not support http datagrams");
         return Err(Error::Protocol(format!(
             "client SETTINGS lack datagram support: {client_settings:?}"
@@ -262,12 +282,25 @@ async fn serve_connection(
 
         let fields = match h3::read_headers_resuming(&mut recv, first_type, buffered).await {
             Ok(f) => f,
-            Err(_) => continue,
+            // Dropping the stream here answers nothing, so the peer waits for
+            // a response that never comes and reports only a generic session
+            // failure. A QPACK sequence we cannot decode looks exactly like
+            // that from the outside, so say so.
+            Err(e) => {
+                tracing::debug!(error = %e, "could not read CONNECT headers");
+                continue;
+            }
         };
+        tracing::debug!(?fields, "CONNECT request");
 
         let is_webtransport = h3::field(&fields, ":method") == Some("CONNECT")
             && h3::field(&fields, ":protocol") == Some("webtransport");
         if !is_webtransport {
+            tracing::debug!(
+                method = ?h3::field(&fields, ":method"),
+                protocol = ?h3::field(&fields, ":protocol"),
+                "not a WebTransport CONNECT, answering 501",
+            );
             let response = vec![(":status".to_owned(), "501".to_owned())];
             let _ = h3::write_headers(&mut send, &response).await;
             continue;
@@ -306,11 +339,25 @@ async fn serve_connection(
         };
 
         // The 2xx response is what establishes the session on the wire.
-        let response = vec![(":status".to_owned(), "200".to_owned())];
-        if h3::write_headers(&mut send, &response).await.is_err() {
+        let mut response = vec![(":status".to_owned(), "200".to_owned())];
+        // draft-02 negotiates in the CONNECT exchange as well as in SETTINGS:
+        // a client offering it sends `Sec-Webtransport-Http3-Draft02: 1` and
+        // the server confirms with `Sec-Webtransport-Http3-Draft: draft02`.
+        // Echoed only when asked for, so a peer on a later draft sees nothing
+        // extra. Chromium negotiates draft-02 and tolerates the confirmation
+        // being absent; nothing says every client does.
+        if h3::field(&fields, "sec-webtransport-http3-draft02").is_some() {
+            response.push((
+                "sec-webtransport-http3-draft".to_owned(),
+                "draft02".to_owned(),
+            ));
+        }
+        if let Err(e) = h3::write_headers(&mut send, &response).await {
+            tracing::debug!(error = %e, session_id, "could not write the CONNECT response");
             connection.registry().remove(session_id);
             continue;
         }
+        tracing::debug!(session_id, "session established");
 
         // The session owns its CONNECT stream: its lifetime is the session's,
         // and close and drain put their capsules on it.

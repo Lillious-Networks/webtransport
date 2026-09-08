@@ -215,6 +215,7 @@ impl Connection {
                             Ok(v) => v,
                             Err(_) => return,
                         };
+                        tracing::trace!(frame_type = ty, "incoming bidi stream");
                         if ty == frame_type::WEBTRANSPORT_BIDI {
                             let (session_id, _) =
                                 match crate::h3::read_varint(&mut recv, rest).await {
@@ -262,6 +263,7 @@ impl Connection {
                             Ok(v) => v,
                             Err(_) => return,
                         };
+                        tracing::trace!(stream_type = ty, "incoming uni stream");
                         if ty == stream_type::WEBTRANSPORT {
                             let (session_id, _) =
                                 match crate::h3::read_varint(&mut recv, rest).await {
@@ -279,6 +281,25 @@ impl Connection {
                             // The control stream carries the peer's SETTINGS,
                             // which gate WebTransport processing.
                             if let Ok((peer, control)) = crate::h3::read_settings(recv).await {
+                                // Logged because a peer that refuses the
+                                // session before CONNECT leaves no other
+                                // trace of why: the codepoints it did and
+                                // did not send are the whole diagnosis, and
+                                // `unknown` is where a draft revision we do
+                                // not advertise shows up.
+                                tracing::debug!(
+                                    extended_connect = peer.enable_connect_protocol,
+                                    h3_datagram = peer.h3_datagram,
+                                    wt_enabled = peer.wt_enabled,
+                                    wt_max_sessions = peer.wt_max_sessions,
+                                    unknown = ?peer.unknown,
+                                    raw = ?peer
+                                        .raw
+                                        .iter()
+                                        .map(|(id, v)| format!("{id:#x}={v}"))
+                                        .collect::<Vec<_>>(),
+                                    "peer SETTINGS",
+                                );
                                 if let Some(tx) = settings.lock().unwrap().take() {
                                     let _ = tx.send(peer);
                                 }

@@ -7,14 +7,20 @@
 //! know WebTransport is available.
 //!
 //! The setting's codepoint changed across drafts, and each codepoint doubles
-//! as version negotiation. We advertise the set that quic-go ships and that
-//! Safari's iOS path accepts: draft-02 (Chromium, Firefox), the final
-//! `SETTINGS_WT_ENABLED`, and the draft-13 `SETTINGS_WT_MAX_SESSIONS`
-//! accompanied by all three `WT_INITIAL_MAX_*` limits — Safari switches
-//! session-level flow control on when the session limit exceeds 1, and with
-//! those three absent it reads zero credit and refuses the session before
-//! CONNECT. The draft-07 spelling is still recognised when parsing so older
-//! clients (Chromium, Safari 26.x on macOS) are accepted.
+//! as version negotiation: a peer sends the setting once per draft it speaks
+//! and the other end picks a codepoint it recognises. We advertise the union
+//! of every codepoint in the field, since the wire format is unchanged across
+//! them for everything we implement and an extra setting costs one varint
+//! pair:
+//!
+//! * draft-02 for Firefox, whose Neqo knows no other, and for quiche.
+//! * draft-07 and draft-13 for Safari, which sends both.
+//! * `SETTINGS_WT_ENABLED` and draft-13 for quic-go and current Chromium.
+//!
+//! The three `WT_INITIAL_MAX_*` limits are deliberately not advertised.
+//! Sending one is a promise to run draft-13 session-level flow control, which
+//! we do not implement: a peer that believes the window is being maintained
+//! stalls when it is not. Safari refuses the session outright.
 
 /// RFC 9204: the dynamic table capacity we permit a peer to use.
 ///
@@ -31,10 +37,9 @@ pub const ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
 pub const H3_DATAGRAM: u64 = 0x33;
 /// draft-07 spelling of `SETTINGS_WEBTRANSPORT_MAX_SESSIONS`.
 ///
-/// Recognised when parsing so older peers (Chromium's draft-07 client and
-/// Safari 26.x on macOS, which refuses servers that do not send it non-zero)
-/// are accepted, but no longer advertised: the quic-go set below is what
-/// Safari's iOS path reads.
+/// Advertised as well as parsed. Safari sends this alongside the draft-13
+/// spelling, so it is one of the two versions Safari will negotiate, and it is
+/// what wtransport advertises.
 pub const WT_MAX_SESSIONS_DRAFT07: u64 = 0xc671_706a;
 /// Final spelling of the support indicator, `SETTINGS_WT_ENABLED`.
 ///
@@ -52,10 +57,9 @@ pub const WT_ENABLED: u64 = 0x2c7c_f000;
 pub const WT_MAX_SESSIONS_DRAFT02: u64 = 0x2b60_3742;
 /// draft-13 spelling of `SETTINGS_WT_MAX_SESSIONS`.
 ///
-/// The codepoint Safari's iOS path requires at a value of at least 1; when it
-/// exceeds 1 Safari also enables session-level flow control, so the three
-/// `WT_INITIAL_MAX_*` settings must be advertised alongside it or the session
-/// is refused before CONNECT.
+/// What quic-go and current Chromium read. Safari sends it too, so advertising
+/// it is safe; what Safari refuses is the flow-control credit that draft-13
+/// would then have us maintain, not this codepoint.
 pub const WT_MAX_SESSIONS_DRAFT13: u64 = 0x14e9_cd29;
 /// draft §9.2: initial session-level flow-control limit.
 pub const WT_INITIAL_MAX_DATA: u64 = 0x2b61;
@@ -82,6 +86,13 @@ pub struct Settings {
     pub qpack_blocked_streams: u64,
     /// Settings we do not recognise, kept for diagnostics.
     pub unknown: Vec<(u64, u64)>,
+    /// Every identifier and value the peer sent, in order.
+    ///
+    /// The recognised fields above fold the draft spellings of the session
+    /// limit together, which loses the one thing that identifies which draft
+    /// the peer speaks. Keeping the raw list makes a refusal diagnosable:
+    /// the codepoint a peer sends is its version.
+    pub raw: Vec<(u64, u64)>,
 }
 
 impl Settings {
@@ -92,14 +103,19 @@ impl Settings {
             h3_datagram: true,
             wt_enabled: true,
             wt_max_sessions: max_sessions,
-            // Safari enables session-level flow control whenever the session
-            // limit exceeds 1 and reads these as the opening credit; leaving
-            // them zero makes it refuse the session before CONNECT. The
-            // values mirror quic-go's, which is what Safari's iOS path was
-            // tested against.
-            wt_initial_max_data: 1 << 60,
-            wt_initial_max_streams_uni: 1 << 60,
-            wt_initial_max_streams_bidi: 1 << 60,
+            // Deliberately zero, which suppresses them: advertising a credit
+            // is a promise to run draft-13 session-level flow control, and we
+            // do not yet send the WT_MAX_DATA and WT_MAX_STREAMS capsules
+            // that keep a peer's window open. Safari takes the promise at
+            // face value and the session then stalls. Measured on iOS: with
+            // any of these present the session fails before `ready`, at 2^60
+            // and at ordinary values alike; with all three absent it
+            // connects, and it connects whether or not the draft-13 and
+            // WT_ENABLED codepoints are also advertised. Restore them in the
+            // same change that implements the capsules, not before.
+            wt_initial_max_data: 0,
+            wt_initial_max_streams_uni: 0,
+            wt_initial_max_streams_bidi: 0,
             // Explicitly zero: the decoder resolves no dynamic references, so
             // a peer must not make any.
             qpack_max_table_capacity: 0,
@@ -110,6 +126,7 @@ impl Settings {
 
     /// Records one setting, ignoring those WebTransport does not care about.
     pub fn apply(&mut self, id: u64, value: u64) {
+        self.raw.push((id, value));
         match id {
             ENABLE_CONNECT_PROTOCOL => self.enable_connect_protocol = value == 1,
             H3_DATAGRAM => self.h3_datagram = value == 1,
@@ -259,11 +276,12 @@ mod tests {
         assert!(s.supports_datagrams());
         assert!(s.wt_enabled);
         assert_eq!(s.wt_max_sessions, 16);
-        // Safari refuses sessions when the session limit exceeds 1 but these
-        // initial flow-control credits are absent, so the advertised set must
-        // always carry them.
-        assert!(s.wt_initial_max_data > 0);
-        assert!(s.wt_initial_max_streams_uni > 0);
-        assert!(s.wt_initial_max_streams_bidi > 0);
+        // The opposite of what this once asserted, and the reason is worth
+        // keeping: advertising a session-level credit promises draft-13 flow
+        // control we do not run, and Safari refuses the session for it. These
+        // stay zero until the WT_MAX_DATA and WT_MAX_STREAMS capsules exist.
+        assert_eq!(s.wt_initial_max_data, 0);
+        assert_eq!(s.wt_initial_max_streams_uni, 0);
+        assert_eq!(s.wt_initial_max_streams_bidi, 0);
     }
 }

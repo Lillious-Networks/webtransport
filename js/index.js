@@ -636,4 +636,4 @@ export {
   WebTransportWriter,
 };
 export { serve } from "./server.js";
-export { generateSelfSigned } from "./cert.js";
+export { generateSelfSigned, generateCaSigned, signWithCa } from "./cert.js";

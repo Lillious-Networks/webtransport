@@ -4,5 +4,12 @@ node_modules/
 npm/
 cert.der
 cert.pem
+*-cert.pem
+*-key.pem
+*.p12
+*-cert.conf
+cert.conf
 *.log
 wpt/.cache/
+.claude
+AGENTS.md

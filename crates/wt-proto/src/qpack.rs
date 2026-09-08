@@ -92,18 +92,18 @@ const STATIC_TABLE: &[(&str, &str)] = &[
     ("content-type", "image/jpeg"),
     ("content-type", "image/png"),
     ("content-type", "text/css"),
-    ("content-type", "text/html;charset=utf-8"),
+    ("content-type", "text/html; charset=utf-8"),
     ("content-type", "text/plain"),
     ("content-type", "text/plain;charset=utf-8"),
     ("range", "bytes=0-"),
     ("strict-transport-security", "max-age=31536000"),
     (
         "strict-transport-security",
-        "max-age=31536000;includesubdomains",
+        "max-age=31536000; includesubdomains",
     ),
     (
         "strict-transport-security",
-        "max-age=31536000;includesubdomains;preload",
+        "max-age=31536000; includesubdomains; preload",
     ),
     ("vary", "accept-encoding"),
     ("vary", "origin"),
@@ -133,7 +133,7 @@ const STATIC_TABLE: &[(&str, &str)] = &[
     ("authorization", ""),
     (
         "content-security-policy",
-        "script-src 'none';object-src 'none';base-uri 'none'",
+        "script-src 'none'; object-src 'none'; base-uri 'none'",
     ),
     ("early-data", "1"),
     ("expect-ct", ""),
@@ -498,5 +498,57 @@ mod tests {
             decode_field_section(Bytes::from(encoded)),
             Err(QpackError::Huffman(_))
         ));
+    }
+
+    /// RFC 9204 Appendix A defines exactly 99 entries, and a peer may index
+    /// any of them. The table was previously short by three, which did not
+    /// merely lose compression: every entry after the gap shifted, so a
+    /// browser's index decoded to the wrong header, and indices past the end
+    /// failed the whole field section. Both spellings of that bug are silent
+    /// at the call site, so pin the size and the anchors that move first.
+    #[test]
+    fn the_static_table_matches_rfc9204() {
+        assert_eq!(STATIC_TABLE.len(), 99);
+        assert_eq!(static_entry(0), Some((":authority", "")));
+        assert_eq!(
+            static_entry(52),
+            Some(("content-type", "text/html; charset=utf-8"))
+        );
+        assert_eq!(
+            static_entry(56),
+            Some(("strict-transport-security", "max-age=31536000"))
+        );
+        assert_eq!(
+            static_entry(57),
+            Some((
+                "strict-transport-security",
+                "max-age=31536000; includesubdomains"
+            ))
+        );
+        assert_eq!(
+            static_entry(58),
+            Some((
+                "strict-transport-security",
+                "max-age=31536000; includesubdomains; preload"
+            ))
+        );
+        assert_eq!(static_entry(95), Some(("user-agent", "")));
+        assert_eq!(static_entry(96), Some(("x-forwarded-for", "")));
+        assert_eq!(static_entry(98), Some(("x-frame-options", "sameorigin")));
+        assert_eq!(static_entry(99), None);
+    }
+
+    /// A browser encodes common request headers by static index. Decoding one
+    /// to the wrong name is what made a real Safari CONNECT unreadable, so
+    /// walk the whole table rather than trusting a spot check.
+    #[test]
+    fn every_static_index_decodes_to_itself() {
+        for (i, (name, value)) in STATIC_TABLE.iter().enumerate() {
+            assert_eq!(
+                static_entry(i as u64),
+                Some((*name, *value)),
+                "index {i} decoded to the wrong entry"
+            );
+        }
     }
 }

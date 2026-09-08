@@ -15,3 +15,37 @@ import { native } from "./native.js";
 export function generateSelfSigned(hostnames = ["localhost"]) {
   return native.generateSelfSigned(hostnames);
 }
+
+/**
+ * Mints a throwaway root CA and a server certificate signed by it.
+ *
+ * Safari on iOS has no click-through for an untrusted certificate, and its
+ * full-trust toggle lists only CAs, so a self-signed leaf cannot be used there
+ * however it is installed: the QUIC handshake fails with a certificate_unknown
+ * alert. Installing the returned root and enabling full trust for it is the
+ * only way to reach a local server from a stock device.
+ *
+ * Serve `cert` alone. Browsers chain it to the root they now trust, and
+ * Chromium rejects a QUIC chain that carries its own root in-band.
+ *
+ * @param {string[]} [hostnames] every name and IP the server answers to
+ * @returns {{ cert: string, key: string, caCert: string, caKey: string, hash: Uint8Array }}
+ */
+export function generateCaSigned(hostnames = ["localhost"]) {
+  return native.generateCaSigned(hostnames);
+}
+
+/**
+ * Signs a fresh server certificate with a CA from `generateCaSigned`.
+ *
+ * Restarting the server must not mint a new root: a device that installed and
+ * trusted the old one would have to repeat the whole dance.
+ *
+ * @param {string[]} hostnames
+ * @param {string} caKeyPem
+ * @param {string} caCertPem
+ * @returns {{ cert: string, key: string, caCert: string, caKey: string, hash: Uint8Array }}
+ */
+export function signWithCa(hostnames, caKeyPem, caCertPem) {
+  return native.signWithCa(hostnames, caKeyPem, caCertPem);
+}

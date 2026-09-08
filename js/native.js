@@ -5,7 +5,7 @@
  */
 
 import { createRequire } from "node:module";
-import { copyFileSync, existsSync, statSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, rmSync, statSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -70,23 +70,64 @@ function libraryName() {
 
 /**
  * Returns a .node path for a cargo-built library, creating it if needed.
+ *
+ * On Windows a loaded addon is locked, so a server still running from an
+ * earlier build holds `wt.node` open and the refresh copy fails with EBUSY.
+ * Returning the .dll in that case only trades one failure for a worse one,
+ * since require cannot load a library that is not named .node. So fall back
+ * to a build-stamped alias, which a running process is never holding.
  * @param {string} path
  */
 function nodeAlias(path) {
-  const alias = join(root, "wt.node");
+  let source;
   try {
-    const source = statSync(path);
-    const existing = existsSync(alias) ? statSync(alias) : null;
-    // Refresh a stale alias so a rebuild is picked up.
-    if (!existing || existing.mtimeMs < source.mtimeMs) {
-      copyFileSync(path, alias);
-    }
+    source = statSync(path);
   } catch {
-    // If the copy fails, fall back to the original path and let require report
-    // whatever the real problem is.
     return path;
   }
-  return alias;
+  const stamped = `wt.${Math.floor(source.mtimeMs).toString(36)}.node`;
+  for (const name of ["wt.node", stamped]) {
+    const alias = join(root, name);
+    try {
+      const existing = existsSync(alias) ? statSync(alias) : null;
+      // Refresh a stale alias so a rebuild is picked up.
+      if (!existing || existing.mtimeMs < source.mtimeMs) {
+        copyFileSync(path, alias);
+      }
+      sweepStaleAliases(name === stamped ? stamped : null);
+      return alias;
+    } catch {
+      // Locked by another process: try the next name.
+    }
+  }
+  // Nothing worked, so let require report the real problem against the
+  // original path.
+  return path;
+}
+
+/**
+ * Deletes build-stamped aliases other than `keep`.
+ *
+ * Each rebuild taken while an older server still holds `wt.node` leaves
+ * another multi-megabyte copy behind, so without this they accumulate
+ * silently. One still loaded by a live process cannot be deleted, which is
+ * exactly the one that must survive: the failure is the desired outcome.
+ * @param {string | null} keep the stamped alias in use, if any
+ */
+function sweepStaleAliases(keep) {
+  try {
+    for (const name of readdirSync(root)) {
+      if (name === keep || name === "wt.node") continue;
+      if (!/^wt\.[a-z0-9]+\.node$/.test(name)) continue;
+      try {
+        rmSync(join(root, name));
+      } catch {
+        // In use by another process, which is reason enough to keep it.
+      }
+    }
+  } catch {
+    // Listing the directory is best effort.
+  }
 }
 
 function isMusl() {

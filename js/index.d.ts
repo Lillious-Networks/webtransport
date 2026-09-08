@@ -310,3 +310,36 @@ export function generateSelfSigned(hostnames?: string[]): {
   key: string;
   hash: Uint8Array;
 };
+
+/**
+ * Mints a throwaway root CA and a server certificate signed by it.
+ *
+ * Safari on iOS offers no click-through for an untrusted certificate, and its
+ * full-trust toggle lists only CAs, so a self-signed leaf cannot be used there
+ * however it is installed. Install `caCert` on the device and serve `cert`
+ * alone: browsers chain it to the root they now trust, and Chromium rejects a
+ * QUIC chain that carries its own root in-band.
+ */
+export function generateCaSigned(hostnames?: string[]): {
+  cert: string;
+  key: string;
+  caCert: string;
+  caKey: string;
+  hash: Uint8Array;
+};
+
+/**
+ * Signs a fresh server certificate with a CA from `generateCaSigned`, so a
+ * device that installed and trusted that root keeps working across restarts.
+ */
+export function signWithCa(
+  hostnames: string[],
+  caKeyPem: string,
+  caCertPem: string,
+): {
+  cert: string;
+  key: string;
+  caCert: string;
+  caKey: string;
+  hash: Uint8Array;
+};

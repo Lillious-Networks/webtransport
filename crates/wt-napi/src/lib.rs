@@ -750,9 +750,32 @@ impl WtBidiStream {
     }
 }
 
+/// Routes the engine's `tracing` output to stderr, once per process.
+///
+/// The addon installs no subscriber by default, so the spans the engine emits
+/// go nowhere unless asked for. Setting `RUST_LOG` (for example
+/// `RUST_LOG=wt_core=debug`) turns them on, which is how a handshake that
+/// fails before the CONNECT handler runs, such as a peer refusing the session
+/// over SETTINGS, can be seen at all. Errors are ignored: a second call, or
+/// a host that already installed a subscriber, is not a failure.
+fn init_tracing() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("RUST_LOG").is_none() {
+            return;
+        }
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .try_init();
+    });
+}
+
 /// Opens a WebTransport session. Resolves once the session is established.
 #[napi]
 pub async fn connect(url: String, options: Option<JsClientOptions>) -> Result<WebTransportSession> {
+    init_tracing();
     let options = options.unwrap_or_default();
 
     let mut hashes = Vec::new();
@@ -917,6 +940,7 @@ impl WebTransportServer {
     /// Tokio runtime to be entered; a sync napi call has no runtime context.
     #[napi(factory)]
     pub async fn bind(options: JsServerOptions) -> Result<Self> {
+        init_tracing();
         let host = options.host.unwrap_or_else(|| "::".to_owned());
         let addr: std::net::SocketAddr = format!("{host}:{}", options.port)
             .parse()
@@ -1099,4 +1123,135 @@ pub fn generate_self_signed(hostnames: Vec<String>) -> Result<SelfSignedCert> {
         key: key.serialize_pem(),
         hash: Uint8Array::new(hash),
     })
+}
+
+/// A server certificate together with the CA that signed it.
+#[napi(object)]
+pub struct CaSignedCert {
+    /// The leaf certificate, PEM. Serve this alone: browsers chain it to the
+    /// root they already trust, and Chromium rejects a QUIC chain that carries
+    /// its own root in-band.
+    pub cert: String,
+    /// The leaf's private key, PEM.
+    pub key: String,
+    /// The CA certificate, PEM. This is what a device installs and trusts.
+    pub ca_cert: String,
+    /// The CA's private key, PEM, so later leaves can reuse the same root.
+    pub ca_key: String,
+    /// SHA-256 of the leaf DER, for `serverCertificateHashes` on desktop.
+    pub hash: Uint8Array,
+}
+
+/// How long a generated CA stays valid. Longer than a leaf because a device
+/// installs it once; iOS caps *server* certificates at 398 days but places no
+/// such limit on a locally installed root.
+const CA_VALIDITY_DAYS: u64 = 365 * 5;
+
+/// Leaf validity. Apple refuses server certificates valid for more than 398
+/// days, so this stays well inside that.
+const LEAF_VALIDITY_DAYS: u64 = 397;
+
+fn days(n: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(n * 24 * 60 * 60)
+}
+
+/// Builds the CA certificate parameters. Marked as a CA with a path length of
+/// zero: iOS only offers the full-trust toggle for certificates that are
+/// actually CAs, which is precisely why a self-signed leaf can never be
+/// trusted there however it is installed.
+fn ca_params() -> Result<rcgen::CertificateParams> {
+    let mut params = rcgen::CertificateParams::new(Vec::new())
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+    ];
+    params.distinguished_name = {
+        let mut dn = rcgen::DistinguishedName::new();
+        dn.push(
+            rcgen::DnType::CommonName,
+            "WebTransport Diagnostic CA".to_owned(),
+        );
+        dn
+    };
+    let now = std::time::SystemTime::now();
+    params.not_before = now.into();
+    params.not_after = (now + days(CA_VALIDITY_DAYS)).into();
+    Ok(params)
+}
+
+/// Signs a leaf for `hostnames` with the given CA.
+fn sign_leaf(
+    hostnames: Vec<String>,
+    ca_key: &rcgen::KeyPair,
+    ca_cert_pem: &str,
+    ca_key_pem: &str,
+) -> Result<CaSignedCert> {
+    let names = if hostnames.is_empty() {
+        vec!["localhost".to_owned()]
+    } else {
+        hostnames
+    };
+    let mut params = rcgen::CertificateParams::new(names)
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    params.is_ca = rcgen::IsCa::ExplicitNoCa;
+    params.use_authority_key_identifier_extension = true;
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    let now = std::time::SystemTime::now();
+    params.not_before = now.into();
+    params.not_after = (now + days(LEAF_VALIDITY_DAYS)).into();
+
+    let issuer = rcgen::Issuer::from_ca_cert_pem(ca_cert_pem, ca_key)
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    let leaf = params
+        .signed_by(&leaf_key, &issuer)
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    let der = rustls_pki_types::CertificateDer::from(leaf.der().to_vec());
+    let hash = wt_core::tls::certificate_hash(&der);
+    Ok(CaSignedCert {
+        cert: leaf.pem(),
+        key: leaf_key.serialize_pem(),
+        ca_cert: ca_cert_pem.to_owned(),
+        ca_key: ca_key_pem.to_owned(),
+        hash: Uint8Array::new(hash),
+    })
+}
+
+/// Mints a throwaway root CA and a server certificate signed by it.
+///
+/// Safari on iOS has no click-through for an untrusted certificate, and the
+/// full-trust toggle lists only CAs, so a self-signed leaf cannot be used
+/// there at all: the QUIC handshake fails with a `certificate_unknown` alert
+/// even after the leaf is installed. Installing the root returned here and
+/// enabling full trust for it is the only way to reach a local server from a
+/// stock device.
+#[napi]
+pub fn generate_ca_signed(hostnames: Vec<String>) -> Result<CaSignedCert> {
+    let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    let ca = ca_params()?
+        .self_signed(&ca_key)
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    let ca_cert_pem = ca.pem();
+    let ca_key_pem = ca_key.serialize_pem();
+    sign_leaf(hostnames, &ca_key, &ca_cert_pem, &ca_key_pem)
+}
+
+/// Signs a fresh leaf with a CA produced earlier by `generateCaSigned`.
+///
+/// Restarting the server must not mint a new root: a device that installed and
+/// trusted the old one would have to repeat the whole dance.
+#[napi]
+pub fn sign_with_ca(
+    hostnames: Vec<String>,
+    ca_key_pem: String,
+    ca_cert_pem: String,
+) -> Result<CaSignedCert> {
+    let ca_key = rcgen::KeyPair::from_pem(&ca_key_pem)
+        .map_err(|e| Error::new(Status::InvalidArg, format!("invalid CA key: {e}")))?;
+    sign_leaf(hostnames, &ca_key, &ca_cert_pem, &ca_key_pem)
 }

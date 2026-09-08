@@ -15,10 +15,11 @@ wt-proto = { path = "../wt-proto" }
 bytes.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
 rustls-pemfile = "2"
 rustls-pki-types = "1"
-rcgen = "0.14"
+rcgen = { version = "0.14", features = ["x509-parser"] }
 napi-derive = "3"
 
 [build-dependencies]

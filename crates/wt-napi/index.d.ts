@@ -245,8 +245,38 @@ export declare class WtSendStream {
   setSendOrder(sendOrder?: bigint | undefined | null): void
 }
 
+/** A server certificate together with the CA that signed it. */
+export interface CaSignedCert {
+  /**
+   * The leaf certificate, PEM. Serve this alone: browsers chain it to the
+   * root they already trust, and Chromium rejects a QUIC chain that carries
+   * its own root in-band.
+   */
+  cert: string
+  /** The leaf's private key, PEM. */
+  key: string
+  /** The CA certificate, PEM. This is what a device installs and trusts. */
+  caCert: string
+  /** The CA's private key, PEM, so later leaves can reuse the same root. */
+  caKey: string
+  /** SHA-256 of the leaf DER, for `serverCertificateHashes` on desktop. */
+  hash: Uint8Array
+}
+
 /** Opens a WebTransport session. Resolves once the session is established. */
 export declare function connect(url: string, options?: JsClientOptions | undefined | null): Promise<WebTransportSession>
+
+/**
+ * Mints a throwaway root CA and a server certificate signed by it.
+ *
+ * Safari on iOS has no click-through for an untrusted certificate, and the
+ * full-trust toggle lists only CAs, so a self-signed leaf cannot be used
+ * there at all: the QUIC handshake fails with a `certificate_unknown` alert
+ * even after the leaf is installed. Installing the root returned here and
+ * enabling full trust for it is the only way to reach a local server from a
+ * stock device.
+ */
+export declare function generateCaSigned(hostnames: Array<string>): CaSignedCert
 
 export declare function generateSelfSigned(hostnames: Array<string>): SelfSignedCert
 
@@ -321,3 +351,11 @@ export interface SelfSignedCert {
   key: string
   hash: Uint8Array
 }
+
+/**
+ * Signs a fresh leaf with a CA produced earlier by `generateCaSigned`.
+ *
+ * Restarting the server must not mint a new root: a device that installed and
+ * trusted the old one would have to repeat the whole dance.
+ */
+export declare function signWithCa(hostnames: Array<string>, caKeyPem: string, caCertPem: string): CaSignedCert
