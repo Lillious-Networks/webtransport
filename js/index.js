@@ -123,6 +123,11 @@ export class WebTransport {
       );
     }
 
+    // Converted here rather than in #connect: IDL conversion is part of the
+    // constructor call, so a value that is not a BufferSource throws where the
+    // caller made the mistake instead of surfacing later as a `ready` rejection.
+    const hashBytes = hashes.map((h) => ({ algorithm: h.algorithm, value: toBytes(h.value) }));
+
     const congestionControl = options.congestionControl ?? "default";
     if (!["default", "throughput", "low-latency"].includes(congestionControl)) {
       throw new TypeError(
@@ -182,16 +187,13 @@ export class WebTransport {
       (native) => new WebTransportReceiveStream(native),
     );
 
-    this.#connect(parsed.href, options, hashes);
+    this.#connect(parsed.href, options, hashBytes);
   }
 
   async #connect(url, options, hashes) {
     try {
       const session = await native.connect(url, {
-        serverCertificateHashes: hashes.map((h) => ({
-          algorithm: h.algorithm,
-          value: toBytes(h.value),
-        })),
+        serverCertificateHashes: hashes,
         headers: normaliseHeaders(options.headers),
         protocols: options.protocols ?? [],
         requireUnreliable: options.requireUnreliable ?? false,
@@ -604,6 +606,15 @@ function toBytes(source) {
     return new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
   }
   if (source instanceof ArrayBuffer) return new Uint8Array(source);
+  // A string is the common case: a hash persisted as base64 or hex and read
+  // back without decoding. Say so, since "must be BufferSource" alone does not
+  // tell the caller what they passed or how to fix it.
+  if (typeof source === "string") {
+    throw new TypeError(
+      "certificate hash values must be BufferSource, got a string. Decode it " +
+        'first, for example Buffer.from(value, "base64")',
+    );
+  }
   throw new TypeError("certificate hash values must be BufferSource");
 }
 

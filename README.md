@@ -81,7 +81,7 @@ client and server.
 ## Connecting without a CA
 
 WebTransport requires TLS even on localhost. `generateSelfSigned` returns a
-certificate a browser will accept by hash, which avoids running a CA for local
+certificate a client will accept by hash, which avoids running a CA for local
 development:
 
 ```ts
@@ -92,10 +92,129 @@ const wt = new WebTransport("https://127.0.0.1:4433/", {
 });
 ```
 
-Certificates used this way must be ECDSA P-256 and valid for at most two weeks,
-which is a spec requirement rather than a choice here. `generateSelfSigned`
-issues a 13-day certificate to stay inside it. Note that `serverCertificateHashes`
-and `allowPooling` are mutually exclusive, per spec.
+### Certificate constraints
+
+A certificate accepted through `serverCertificateHashes` must satisfy the W3C
+WebTransport requirements:
+
+| Property | Requirement |
+|---|---|
+| Key | ECDSA P-256 |
+| Validity period | At most 14 days |
+| Subject Alternative Name | Must cover the host in the connection URL |
+
+`serverCertificateHashes` and `allowPooling` are mutually exclusive; supplying
+both throws `NotSupportedError` from the constructor. Safari does not implement
+`serverCertificateHashes`. For Safari, use a certificate that chains to a
+trusted CA (see `generateCaSigned`).
+
+### `generateSelfSigned(hostnames?)`
+
+Returns `{ cert: string, key: string, hash: Uint8Array }`.
+
+| Field | Format |
+|---|---|
+| `cert` | PEM-encoded certificate, ECDSA P-256, valid for 13 days |
+| `key` | PEM-encoded PKCS#8 private key |
+| `hash` | 32-byte SHA-256 digest of the DER-encoded certificate |
+
+`hostnames` defaults to `["localhost"]` and populates the SAN. Each call
+generates a new key pair and certificate. Two calls, including calls made in
+separate processes, return different certificates with different hashes.
+
+### Hash value
+
+`serverCertificateHashes[].value` is typed `BufferSource`. The library accepts a
+`Uint8Array`, any other `ArrayBufferView`, or an `ArrayBuffer`. Strings are
+rejected with `TypeError` at construction. A `sha-256` value must be exactly 32
+bytes.
+
+The hash is the SHA-256 digest of the certificate's DER encoding, so it can be
+recomputed from the PEM at any time:
+
+```ts
+import { createHash, X509Certificate } from "node:crypto";
+
+const hash = new Uint8Array(createHash("sha256").update(new X509Certificate(cert).raw).digest());
+```
+
+### Persisting a certificate across processes
+
+When the server and client run as separate processes, both must use the same
+certificate. The following module persists the PEM files, derives the hash on
+load, and regenerates the certificate within 24 hours of expiry:
+
+```ts
+// devcert.ts, imported by both server and client
+import { createHash, X509Certificate } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { generateSelfSigned } from "@lillious-networks/webtransport-bun";
+
+const DIR = ".certs";
+const CERT = join(DIR, "cert.pem");
+const KEY = join(DIR, "key.pem");
+const RENEW_MS = 24 * 60 * 60 * 1000;
+
+function load() {
+  if (!existsSync(CERT) || !existsSync(KEY)) return null;
+  const cert = readFileSync(CERT, "utf8");
+  const expires = Date.parse(new X509Certificate(cert).validTo);
+  if (expires - Date.now() < RENEW_MS) return null;
+  return { cert, key: readFileSync(KEY, "utf8") };
+}
+
+export function devCertificate() {
+  let pair = load();
+  if (!pair) {
+    const { cert, key } = generateSelfSigned(["localhost", "127.0.0.1"]);
+    mkdirSync(DIR, { recursive: true });
+    writeFileSync(CERT, cert);
+    writeFileSync(KEY, key, { mode: 0o600 });
+    pair = { cert, key };
+  }
+  const hash = new Uint8Array(
+    createHash("sha256").update(new X509Certificate(pair.cert).raw).digest(),
+  );
+  return { ...pair, hash };
+}
+```
+
+```ts
+// server.ts
+const { cert, key } = devCertificate();
+await serve({ port: 4433, cert, key, session(session) {} });
+
+// client.ts
+const { hash } = devCertificate();
+const wt = new WebTransport("https://127.0.0.1:4433/", {
+  serverCertificateHashes: [{ algorithm: "sha-256", value: hash }],
+});
+```
+
+`.certs/key.pem` is a private key and should be excluded from version control.
+A renewed certificate has a new hash; clients holding the previous hash must
+reload it.
+
+### Transmitting the hash as text
+
+To deliver the hash to a client that cannot share the module above, such as a
+browser page, encode it as base64 and decode it back to bytes before passing it
+to `WebTransport`:
+
+```ts
+const text = Buffer.from(hash).toString("base64"); // server
+const value = Uint8Array.from(atob(text), (c) => c.charCodeAt(0)); // browser
+```
+
+### Errors
+
+| Error | Cause |
+|---|---|
+| `server certificate does not match any serverCertificateHashes entry` | The server presented a certificate whose digest is not in `serverCertificateHashes`. The two sides are using different certificates. |
+| `TypeError: certificate hash values must be BufferSource, got a string` | `value` is a string. Decode it to bytes. |
+| `a Sha256 hash must be 32 bytes, got N` | `value` has the wrong length, typically from decoding with the wrong encoding. |
+| Handshake failure after the certificate's `validTo` | The certificate has expired. Regenerate it. |
 
 ## Scheduling
 
@@ -115,7 +234,8 @@ Each group is its own numberspace, so orders never compare across groups.
 Exports: `WebTransport`, `WebTransportError`, `WebTransportSendGroup`,
 `WebTransportDatagramDuplexStream`, `WebTransportDatagramsWritable`,
 `WebTransportBidirectionalStream`, `WebTransportReceiveStream`,
-`WebTransportSendStream`, `WebTransportWriter`, `serve`, `generateSelfSigned`.
+`WebTransportSendStream`, `WebTransportWriter`, `serve`, `generateSelfSigned`,
+`generateCaSigned`, `signWithCa`.
 
 Full type declarations are in [`js/index.d.ts`](js/index.d.ts). Runnable
 examples are in [`examples/`](examples/).

@@ -286,6 +286,21 @@ describe("pooling", () => {
     }
   });
 
+  test("a string certificate hash is refused at construction", () => {
+    // IDL conversion happens in the constructor, so a hash that is not a
+    // BufferSource throws there rather than surfacing later on `ready`. A
+    // base64 hash read back from disk without decoding is how this happens.
+    try {
+      new WebTransport("https://example.com/", {
+        serverCertificateHashes: [{ algorithm: "sha-256", value: "KsCsxXrW" as any }],
+      });
+      throw new Error("should have thrown");
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(TypeError);
+      expect(err.message).toContain("got a string");
+    }
+  });
+
   test("allowPooling alone is accepted", async () => {
     // Without hashes the option is legal; it simply may not find a connection
     // to reuse here.
