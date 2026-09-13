@@ -194,7 +194,8 @@ jobs:
         run: |
           set -euo pipefail
           npm pack --dry-run --ignore-scripts 2>&1 | tee pack.txt
-          grep -q "js/index.js" pack.txt || { echo "::error::js/ missing from tarball"; exit 1; }
+          grep -q "js/index.ts" pack.txt || { echo "::error::js/ missing from tarball"; exit 1; }
+          grep -q "js/types.d.ts" pack.txt || { echo "::error::type declarations missing from tarball"; exit 1; }
           grep -q "wt.linux-x64-gnu.node" pack.txt || { echo "::error::prebuilds missing from tarball"; exit 1; }
       - name: Publish to npm
         run: npm publish --ignore-scripts --access public --provenance

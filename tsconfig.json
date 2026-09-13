@@ -6,12 +6,17 @@
     "types": ["bun"],
     "strict": true,
     "noEmit": true,
-    "allowJs": true,
-    "checkJs": false,
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["js/**/*.d.ts", "examples/**/*.ts", "bench/**/*.ts", "src/**/*.ts"],
+  "include": [
+    "js/**/*.ts",
+    "test/public-api.check.ts",
+    "examples/**/*.ts",
+    "bench/**/*.ts",
+    "src/**/*.ts"
+  ],
   "exclude": ["node_modules", "target"]
 }

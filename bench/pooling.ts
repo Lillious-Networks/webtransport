@@ -8,7 +8,7 @@
  *   bun bench/pooling.ts
  */
 
-import { generateSelfSigned, serve } from "../js/index.js";
+import { generateSelfSigned, serve } from "../js/index.ts";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);

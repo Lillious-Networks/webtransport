@@ -7,7 +7,7 @@
  *   bun bench/datagrams.ts
  */
 
-import { WebTransport, generateSelfSigned, serve } from "../js/index.js";
+import { WebTransport, generateSelfSigned, serve } from "../js/index.ts";
 
 const PAYLOAD_SIZES = [64, 512, 1024];
 const THROUGHPUT_DURATION_MS = 3000;

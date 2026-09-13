@@ -16,7 +16,7 @@
  * full static table, and the SETTINGS ordering rules that our client never
  * stresses.
  */
-import { generateSelfSigned, serve } from "../js/index.js";
+import { generateSelfSigned, serve } from "../js/index.ts";
 
 // Surface the engine's own tracing, which is where a handshake that fails
 // before our CONNECT handler reports why.

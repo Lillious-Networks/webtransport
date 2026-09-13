@@ -117,37 +117,52 @@ export class WebTransportError extends DOMException {
 }
 
 export class WebTransportSendGroup {
+  private constructor();
   getStats(): Promise<WebTransportSendStreamStats>;
 }
 
 export class WebTransportSendStream extends WritableStream<ArrayBufferView | ArrayBuffer> {
+  private constructor();
   sendGroup: WebTransportSendGroup | null;
-  sendOrder: bigint;
+  /**
+   * The IDL's `long long`, which WebIDL maps to a Number. Accepts a bigint so
+   * the full 64-bit range reaches the scheduler; the value reads back as a
+   * Number and loses precision beyond 2**53.
+   */
+  get sendOrder(): number;
+  set sendOrder(value: number | bigint);
   getStats(): Promise<WebTransportSendStreamStats>;
   getWriter(): WebTransportWriter;
 }
 
 export class WebTransportReceiveStream extends ReadableStream<Uint8Array> {
+  private constructor();
   getStats(): Promise<WebTransportReceiveStreamStats>;
 }
 
 export class WebTransportWriter extends WritableStreamDefaultWriter<ArrayBufferView | ArrayBuffer> {
+  private constructor();
   /** Rejects unless the chunk fits entirely in the current flow-control window. */
   atomicWrite(chunk?: ArrayBufferView | ArrayBuffer): Promise<void>;
   commit(): void;
 }
 
 export class WebTransportBidirectionalStream {
+  private constructor();
   readonly readable: WebTransportReceiveStream;
   readonly writable: WebTransportSendStream;
 }
 
 export class WebTransportDatagramsWritable extends WritableStream<ArrayBufferView | ArrayBuffer> {
+  private constructor();
   sendGroup: WebTransportSendGroup | null;
-  sendOrder: bigint;
+  /** See {@link WebTransportSendStream.sendOrder}. */
+  get sendOrder(): number;
+  set sendOrder(value: number | bigint);
 }
 
 export class WebTransportDatagramDuplexStream {
+  private constructor();
   readonly readable: ReadableStream<Uint8Array>;
   createWritable(options?: WebTransportSendOptions): WebTransportDatagramsWritable;
   readonly maxDatagramSize: number;
@@ -198,7 +213,8 @@ export class WebTransport {
   readonly incomingUnidirectionalStreams: ReadableStream<WebTransportReceiveStream>;
 
   createSendGroup(): WebTransportSendGroup;
-  getStats(): Promise<WebTransportConnectionStats>;
+  /** Empty once the session has ended, since there is no connection to measure. */
+  getStats(): Promise<Partial<WebTransportConnectionStats>>;
   exportKeyingMaterial(
     label: ArrayBufferView | ArrayBuffer,
     context: ArrayBufferView | ArrayBuffer,
@@ -218,6 +234,7 @@ export class WebTransport {
 
 /** A session as seen by the server. Same shape as a client `WebTransport`. */
 export class WebTransportServerSession {
+  private constructor();
   /** The CONNECT stream id identifying this session on its connection. */
   readonly id: bigint;
   readonly datagrams: WebTransportDatagramDuplexStream;
@@ -262,6 +279,7 @@ export class WebTransportServerSession {
 
 /** The extended CONNECT request that opened a session. */
 export class WebTransportSessionRequest {
+  private constructor();
   readonly path: string;
   readonly authority: string;
   readonly headers: Headers;
@@ -295,7 +313,8 @@ export interface ServeOptions {
 
 export interface WebTransportServer {
   readonly port: number;
-  stop(): void;
+  /** Stops accepting. Resolves once the server's accept and error loops have finished. */
+  stop(): Promise<void>;
 }
 
 /** Starts a WebTransport server. */

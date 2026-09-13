@@ -5,7 +5,7 @@
     "type": "git",
     "url": "git+https://github.com/Lillious-Networks/WebTransport.git"
   },
-  "main": "js/index.js",
+  "main": "js/index.ts",
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0",
     "@types/bun": "latest",
@@ -14,9 +14,9 @@
   },
   "exports": {
     ".": {
-      "types": "./js/index.d.ts",
-      "bun": "./js/index.js",
-      "default": "./js/index.js"
+      "types": "./js/types.d.ts",
+      "bun": "./js/index.ts",
+      "default": "./js/index.ts"
     }
   },
   "bugs": {
@@ -63,5 +63,5 @@
     "wpt": "bun wpt/run.ts"
   },
   "type": "module",
-  "types": "js/index.d.ts"
+  "types": "js/types.d.ts"
 }

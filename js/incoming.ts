@@ -6,15 +6,17 @@
  * stream to the consumer and closes when the session ends.
  */
 
-import { toWebTransportError } from "./errors.js";
+import { toWebTransportError } from "./errors.ts";
 
 /**
- * @param {() => Promise<object | null>} accept the addon's accept call
- * @param {(native: object) => object} wrap builds the JS stream object
- * @returns {ReadableStream}
+ * @param accept the addon's accept call, resolving null once the session ends
+ * @param wrap builds the JS stream object around an accepted native handle
  */
-export function makeIncomingStreams(accept, wrap) {
-  return new ReadableStream({
+export function makeIncomingStreams<N, T>(
+  accept: () => Promise<N | null | undefined>,
+  wrap: (native: N) => T,
+): ReadableStream<T> {
+  return new ReadableStream<T>({
     async pull(controller) {
       try {
         const native = await accept();

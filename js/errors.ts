@@ -6,17 +6,16 @@
  * code mapping).
  */
 
-export class WebTransportError extends DOMException {
-  #source;
-  #streamErrorCode;
+import type { WebTransportErrorOptions, WebTransportErrorSource } from "./types.d.ts";
 
-  /**
-   * @param {string} [message]
-   * @param {{ source?: "stream" | "session", streamErrorCode?: number | null }} [options]
-   */
-  constructor(message = "", options = {}) {
+export class WebTransportError extends DOMException {
+  #source: WebTransportErrorSource;
+  #streamErrorCode: number | null;
+
+  constructor(message = "", options: WebTransportErrorOptions = {}) {
     super(message, "WebTransportError");
     const source = options.source ?? "stream";
+    // Typed callers cannot reach this, but a JS caller can pass anything.
     if (source !== "stream" && source !== "session") {
       throw new TypeError(
         `source must be "stream" or "session", got ${JSON.stringify(source)}`,
@@ -34,13 +33,11 @@ export class WebTransportError extends DOMException {
     }
   }
 
-  /** @returns {"stream" | "session"} */
-  get source() {
+  get source(): WebTransportErrorSource {
     return this.#source;
   }
 
-  /** @returns {number | null} */
-  get streamErrorCode() {
+  get streamErrorCode(): number | null {
     return this.#streamErrorCode;
   }
 }
@@ -54,14 +51,11 @@ const RESET_PATTERN = /peer reset the stream \(code (\d+)\)/;
 const STOPPED_PATTERN = /peer stopped reading the stream \(code (\d+)\)/;
 const CLOSED_BY_PEER_PATTERN = /peer closed the session \(code (\d+)\)/;
 
-/**
- * Converts an error thrown by the native addon into a WebTransportError.
- *
- * @param {unknown} err
- * @param {"stream" | "session"} [defaultSource]
- * @returns {WebTransportError}
- */
-export function toWebTransportError(err, defaultSource = "session") {
+/** Converts an error thrown by the native addon into a WebTransportError. */
+export function toWebTransportError(
+  err: unknown,
+  defaultSource: WebTransportErrorSource = "session",
+): WebTransportError {
   if (err instanceof WebTransportError) return err;
 
   const message = err instanceof Error ? err.message : String(err);
@@ -96,12 +90,8 @@ export function toWebTransportError(err, defaultSource = "session") {
  *
  * The spec has `ready`, `closed` and `draining` reject in the normal course of
  * events, and an application is not obliged to observe all three.
- *
- * @template T
- * @param {Promise<T>} promise
- * @returns {Promise<T>}
  */
-export function markHandled(promise) {
+export function markHandled<T>(promise: Promise<T>): Promise<T> {
   promise.catch(() => {});
   return promise;
 }

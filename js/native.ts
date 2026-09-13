@@ -8,6 +8,43 @@ import { createRequire } from "node:module";
 import { copyFileSync, existsSync, rmSync, statSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import type * as Addon from "../crates/wt-napi/index.d.ts";
+
+/**
+ * A native session.
+ *
+ * The generated declaration types the datagram pump's callback as taking no
+ * arguments, because napi-rs cannot describe a threadsafe function's payload.
+ * It is called with one packed batch, so that signature is restated here.
+ */
+export type NativeSession = Omit<Addon.WebTransportSession, "startDatagramPump"> & {
+  startDatagramPump(callback: (packed: Uint8Array) => void): void;
+};
+
+/** An incoming session, whose `accept` yields the corrected session type. */
+export type NativeIncomingSession = Omit<Addon.IncomingSession, "accept"> & {
+  accept(): NativeSession;
+};
+
+/** A listening server, whose `accept` yields the corrected incoming type. */
+export type NativeServer = Omit<Addon.WebTransportServer, "accept"> & {
+  accept(): Promise<NativeIncomingSession | null | undefined>;
+};
+
+/**
+ * The addon's exports.
+ *
+ * As napi-rs declares them, except where a session is produced: those return
+ * the corrected types above. The correction is applied here, where the untyped
+ * `require` result first acquires a type, so no other module needs a cast.
+ */
+export type NativeModule = Omit<typeof Addon, "connect" | "WebTransportServer"> & {
+  connect(url: string, options?: Addon.JsClientOptions | null): Promise<NativeSession>;
+  WebTransportServer: { bind(options: Addon.JsServerOptions): Promise<NativeServer> };
+};
+export type NativeBidiStream = Addon.WtBidiStream;
+export type NativeRecvStream = Addon.WtRecvStream;
+export type NativeSendStream = Addon.WtSendStream;
 
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -21,7 +58,7 @@ const root = join(here, "..");
  * only becomes the alias once it is newer. Ordering these first means a dev
  * rebuild is picked up on the next load instead of being silently shadowed.
  */
-function cargoDirs() {
+function cargoDirs(): string[] {
   try {
     return readdirSync(join(root, "target"), { withFileTypes: true })
       .filter((d) => d.isDirectory() && d.name !== "release" && d.name !== "debug")
@@ -35,7 +72,7 @@ function cargoDirs() {
 }
 
 /** Candidate locations, most specific first. */
-function candidates() {
+function candidates(): string[] {
   const { platform, arch } = process;
   // The suffix has to match the published prebuild names exactly. Linux
   // distinguishes its C library, and Windows carries the toolchain: the
@@ -57,7 +94,7 @@ function candidates() {
   ];
 }
 
-function libraryName() {
+function libraryName(): string {
   switch (process.platform) {
     case "win32":
       return "wt_napi.dll";
@@ -76,9 +113,8 @@ function libraryName() {
  * Returning the .dll in that case only trades one failure for a worse one,
  * since require cannot load a library that is not named .node. So fall back
  * to a build-stamped alias, which a running process is never holding.
- * @param {string} path
  */
-function nodeAlias(path) {
+function nodeAlias(path: string): string {
   let source;
   try {
     source = statSync(path);
@@ -112,9 +148,10 @@ function nodeAlias(path) {
  * another multi-megabyte copy behind, so without this they accumulate
  * silently. One still loaded by a live process cannot be deleted, which is
  * exactly the one that must survive: the failure is the desired outcome.
- * @param {string | null} keep the stamped alias in use, if any
+ *
+ * @param keep the stamped alias in use, if any
  */
-function sweepStaleAliases(keep) {
+function sweepStaleAliases(keep: string | null): void {
   try {
     for (const name of readdirSync(root)) {
       if (name === keep || name === "wt.node") continue;
@@ -130,17 +167,21 @@ function sweepStaleAliases(keep) {
   }
 }
 
-function isMusl() {
+function isMusl(): boolean {
   try {
-    // glibc reports itself in the report; musl builds do not.
-    return !process.report?.getReport?.()?.header?.glibcVersionRuntime;
+    // glibc reports itself in the report; musl builds do not. The report's
+    // declared type is an opaque object, so the one field read is named here.
+    const report = process.report?.getReport?.() as
+      | { header?: { glibcVersionRuntime?: string } }
+      | undefined;
+    return !report?.header?.glibcVersionRuntime;
   } catch {
     return false;
   }
 }
 
-function load() {
-  const tried = [];
+function load(): NativeModule {
+  const tried: string[] = [];
   for (const path of candidates()) {
     tried.push(path);
     if (!existsSync(path)) continue;
@@ -152,7 +193,7 @@ function load() {
       return require(loadable);
     } catch (err) {
       throw new Error(
-        `Found the WebTransport addon at ${path} but could not load it: ${err.message}`,
+        `Found the WebTransport addon at ${path} but could not load it: ${(err as Error).message}`,
         { cause: err },
       );
     }
@@ -163,4 +204,4 @@ function load() {
   );
 }
 
-export const native = load();
+export const native: NativeModule = load();

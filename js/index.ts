@@ -2,23 +2,32 @@
  * W3C WebTransport for Bun.
  *
  * Implements the WebTransport Candidate Recommendation of 30 July 2026 over a
- * Rust QUIC/HTTP-3 stack. Milestone 1 covers sessions and datagrams; streams
- * arrive in milestone 2.
+ * Rust QUIC/HTTP-3 stack.
  */
 
-import { native } from "./native.js";
-import { WebTransportError, toWebTransportError, markHandled } from "./errors.js";
+import { native } from "./native.ts";
+import type { NativeSession } from "./native.ts";
+import { WebTransportError, toWebTransportError, markHandled } from "./errors.ts";
 import {
   WebTransportDatagramDuplexStream,
   WebTransportDatagramsWritable,
-} from "./datagrams.js";
+} from "./datagrams.ts";
 import {
   WebTransportBidirectionalStream,
   WebTransportReceiveStream,
   WebTransportSendStream,
   WebTransportWriter,
-} from "./streams.js";
-import { makeIncomingStreams } from "./incoming.js";
+} from "./streams.ts";
+import type { BufferChunk } from "./streams.ts";
+import { makeIncomingStreams } from "./incoming.ts";
+import type {
+  WebTransportCloseInfo,
+  WebTransportCongestionControl,
+  WebTransportConnectionStats,
+  WebTransportOptions,
+  WebTransportReliabilityMode,
+  WebTransportSendStreamStats,
+} from "./types.d.ts";
 
 /**
  * Largest keying material `exportKeyingMaterial` will derive.
@@ -29,41 +38,48 @@ import { makeIncomingStreams } from "./incoming.js";
  */
 const MAX_KEYING_MATERIAL = 4096;
 
+/** Options for opening an outgoing stream. */
+export interface CreateStreamOptions {
+  sendGroup?: WebTransportSendGroup | null;
+  /** 64-bit; pass a bigint to use the full range. */
+  sendOrder?: number | bigint;
+  /** When false, fails rather than waiting if the peer's stream limit is reached. */
+  waitUntilAvailable?: boolean;
+}
+
+type SessionState = "connecting" | "connected" | "draining" | "closed" | "failed";
+
 /**
  * Groups streams for bandwidth allocation. Each group is an equal claimant on
  * bandwidth and its own `sendOrder` numberspace.
  */
 export class WebTransportSendGroup {
-  #transport;
-  #id;
-  #streams = new Set();
+  #transport: WebTransport;
+  #id: bigint;
+  #streams = new Set<WebTransportSendStream>();
 
-  /**
-   * @param {WebTransport} transport
-   * @param {bigint} id identifies the group to the scheduler
-   */
-  constructor(transport, id) {
+  /** @param id identifies the group to the scheduler */
+  constructor(transport: WebTransport, id: bigint) {
     this.#transport = transport;
     this.#id = id;
   }
 
   /** @internal */
-  get transport() {
+  get transport(): WebTransport {
     return this.#transport;
   }
 
   /** @internal the scheduler's identifier for this group */
-  get id() {
+  get id(): bigint {
     return this.#id;
   }
 
   /** @internal tracks a stream so the group can total its statistics */
-  addStream(stream) {
+  addStream(stream: WebTransportSendStream): void {
     this.#streams.add(stream);
   }
 
-  /** @returns {Promise<{bytesWritten: bigint, bytesSent: bigint, bytesAcknowledged: bigint}>} */
-  async getStats() {
+  async getStats(): Promise<WebTransportSendStreamStats> {
     // A group's statistics are the sum of its streams'.
     let bytesWritten = 0n;
     let bytesSent = 0n;
@@ -79,37 +95,33 @@ export class WebTransportSendGroup {
 }
 
 export class WebTransport {
-  #native = null;
-  #datagrams = null;
+  #native: NativeSession | null = null;
+  #datagrams: WebTransportDatagramDuplexStream;
   /** Settles with the addon session, so objects that need it can exist first. */
-  #sessionReady;
-  #resolveSession;
-  #rejectSession;
-  #state = "connecting";
-  #ready;
-  #closed;
-  #draining;
-  #resolveReady;
-  #rejectReady;
-  #resolveClosed;
-  #rejectClosed;
-  #resolveDraining;
-  #rejectDraining;
-  #reliability = "pending";
-  #congestionControl;
+  #sessionReady: Promise<NativeSession> | null;
+  #resolveSession!: (session: NativeSession) => void;
+  #rejectSession!: (reason: unknown) => void;
+  #state: SessionState = "connecting";
+  #ready: Promise<undefined>;
+  #closed: Promise<WebTransportCloseInfo>;
+  #draining: Promise<undefined>;
+  #resolveReady!: (value: undefined) => void;
+  #rejectReady!: (reason: unknown) => void;
+  #resolveClosed!: (info: WebTransportCloseInfo) => void;
+  #rejectClosed!: (reason: unknown) => void;
+  #resolveDraining!: (value: undefined) => void;
+  #rejectDraining!: (reason: unknown) => void;
+  #reliability: WebTransportReliabilityMode = "pending";
+  #congestionControl: WebTransportCongestionControl;
   #protocol = "";
-  #responseHeaders = null;
-  #anticipatedIncomingUni = null;
-  #anticipatedIncomingBidi = null;
-  #incomingBidi = null;
-  #incomingUni = null;
+  #responseHeaders: Headers | null = null;
+  #anticipatedIncomingUni: number | null = null;
+  #anticipatedIncomingBidi: number | null = null;
+  #incomingBidi: ReadableStream<WebTransportBidirectionalStream>;
+  #incomingUni: ReadableStream<WebTransportReceiveStream>;
   #nextSendGroupId = 1n;
 
-  /**
-   * @param {string} url
-   * @param {object} [options]
-   */
-  constructor(url, options = {}) {
+  constructor(url: string, options: WebTransportOptions = {}) {
     // These checks are synchronous throws in the spec, so they run before any
     // I/O is started.
     const parsed = parseUrl(url);
@@ -147,19 +159,19 @@ export class WebTransport {
       options.anticipatedConcurrentIncomingBidirectionalStreams ?? null;
 
     this.#ready = markHandled(
-      new Promise((resolve, reject) => {
+      new Promise<undefined>((resolve, reject) => {
         this.#resolveReady = resolve;
         this.#rejectReady = reject;
       }),
     );
     this.#closed = markHandled(
-      new Promise((resolve, reject) => {
+      new Promise<WebTransportCloseInfo>((resolve, reject) => {
         this.#resolveClosed = resolve;
         this.#rejectClosed = reject;
       }),
     );
     this.#draining = markHandled(
-      new Promise((resolve, reject) => {
+      new Promise<undefined>((resolve, reject) => {
         this.#resolveDraining = resolve;
         this.#rejectDraining = reject;
       }),
@@ -169,15 +181,18 @@ export class WebTransport {
     // `incomingUnidirectionalStreams` getters return stored objects and never
     // throw, so they exist from here. Each is backed by a promise for the
     // session, which the handshake settles.
-    this.#sessionReady = markHandled(
-      new Promise((resolve, reject) => {
+    const sessionReady = markHandled(
+      new Promise<NativeSession>((resolve, reject) => {
         this.#resolveSession = resolve;
         this.#rejectSession = reject;
       }),
     );
-    this.#datagrams = new WebTransportDatagramDuplexStream(this.#sessionReady, {
+    this.#sessionReady = sessionReady;
+    this.#datagrams = new WebTransportDatagramDuplexStream(sessionReady, {
       readableType: datagramsReadableType,
     });
+    // These read the field rather than the local, so a released session is
+    // not held alive by the accept loops.
     this.#incomingBidi = makeIncomingStreams(
       async () => (await this.#sessionReady)?.acceptBidirectionalStream() ?? null,
       (native) => new WebTransportBidirectionalStream(native, { transport: this }),
@@ -190,9 +205,13 @@ export class WebTransport {
     this.#connect(parsed.href, options, hashBytes);
   }
 
-  async #connect(url, options, hashes) {
+  async #connect(
+    url: string,
+    options: WebTransportOptions,
+    hashes: { algorithm: string; value: Uint8Array }[],
+  ): Promise<void> {
     try {
-      const session = await native.connect(url, {
+      const session: NativeSession = await native.connect(url, {
         serverCertificateHashes: hashes,
         headers: normaliseHeaders(options.headers),
         protocols: options.protocols ?? [],
@@ -203,17 +222,19 @@ export class WebTransport {
 
       this.#native = session;
       this.#state = "connected";
-      this.#reliability = session.reliability;
+      this.#reliability = session.reliability as WebTransportReliabilityMode;
       this.#protocol = session.protocol ?? "";
       // The spec exposes the CONNECT response headers as a Headers object,
       // and leaves it null when the handshake produced none. Pseudo-headers
       // are dropped: they are not headers, and Headers rejects the name.
-      const pairs = (session.responseHeaders ?? []).filter(([name]) => !name.startsWith(":"));
+      const pairs = (session.responseHeaders ?? [])
+        .filter(([name]) => !name?.startsWith(":"))
+        .map(([name, value]): [string, string] => [name ?? "", value ?? ""]);
       this.#responseHeaders = pairs.length ? new Headers(pairs) : null;
       // Releases the datagram and incoming-stream objects built in the
       // constructor, which have been waiting on this.
       this.#resolveSession(session);
-      this.#resolveReady();
+      this.#resolveReady(undefined);
 
       this.#watchLifecycle(session);
     } catch (err) {
@@ -228,7 +249,7 @@ export class WebTransport {
     }
   }
 
-  async #watchLifecycle(session) {
+  async #watchLifecycle(session: NativeSession): Promise<void> {
     // Resolves true once the session drains, false if it ends without ever
     // draining. `draining` stays pending in that second case, as the spec
     // requires: it reports that the session began winding down, not that it
@@ -238,7 +259,7 @@ export class WebTransport {
       (drained) => {
         if (!drained) return;
         if (this.#state === "connected") this.#state = "draining";
-        this.#resolveDraining();
+        this.#resolveDraining(undefined);
       },
       () => {},
     );
@@ -266,58 +287,51 @@ export class WebTransport {
    * had it by the time the session is over, so releasing here is safe and is
    * what lets the addon reclaim the connection.
    */
-  #releaseSession() {
+  #releaseSession(): void {
     this.#native = null;
     this.#sessionReady = null;
-    this.#datagrams?.releaseSession();
+    this.#datagrams.releaseSession();
   }
 
-  /** @returns {Promise<undefined>} */
-  get ready() {
+  get ready(): Promise<undefined> {
     return this.#ready;
   }
 
-  /** @returns {Promise<{closeCode: number, reason: string}>} */
-  get closed() {
+  get closed(): Promise<WebTransportCloseInfo> {
     return this.#closed;
   }
 
-  /** @returns {Promise<undefined>} */
-  get draining() {
+  get draining(): Promise<undefined> {
     return this.#draining;
   }
 
-  /** @returns {"pending" | "reliable-only" | "supports-unreliable"} */
-  get reliability() {
+  get reliability(): WebTransportReliabilityMode {
     return this.#reliability;
   }
 
-  get congestionControl() {
+  get congestionControl(): WebTransportCongestionControl {
     return this.#congestionControl;
   }
 
   /**
-   * @returns {WebTransportDatagramDuplexStream}
-   *
    * Always present: the spec's getter returns the stored object, so it exists
    * from the constructor and never throws for a session still connecting.
    */
-  get datagrams() {
+  get datagrams(): WebTransportDatagramDuplexStream {
     return this.#datagrams;
   }
 
-  /**
-   * Opens a bidirectional stream.
-   * @param {{sendGroup?: object|null, sendOrder?: number|bigint, waitUntilAvailable?: boolean}} [options]
-   * @returns {Promise<WebTransportBidirectionalStream>}
-   */
-  async createBidirectionalStream(options = {}) {
+  /** Opens a bidirectional stream. */
+  async createBidirectionalStream(
+    options: CreateStreamOptions = {},
+  ): Promise<WebTransportBidirectionalStream> {
     this.#assertUsable();
     validateSendGroup(options.sendGroup, this);
     try {
       // Awaited rather than read from #native: a call before `ready` waits
       // for the handshake instead of failing.
       const session = await this.#sessionReady;
+      if (!session) throw new DOMException("the session is closed", "InvalidStateError");
       const native = await session.createBidirectionalStream(
         options.sendGroup?.id ?? null,
         toSendOrder(options.sendOrder),
@@ -329,16 +343,15 @@ export class WebTransport {
     }
   }
 
-  /**
-   * Opens a unidirectional stream.
-   * @param {{sendGroup?: object|null, sendOrder?: number|bigint, waitUntilAvailable?: boolean}} [options]
-   * @returns {Promise<WebTransportSendStream>}
-   */
-  async createUnidirectionalStream(options = {}) {
+  /** Opens a unidirectional stream. */
+  async createUnidirectionalStream(
+    options: CreateStreamOptions = {},
+  ): Promise<WebTransportSendStream> {
     this.#assertUsable();
     validateSendGroup(options.sendGroup, this);
     try {
       const session = await this.#sessionReady;
+      if (!session) throw new DOMException("the session is closed", "InvalidStateError");
       const native = await session.createUnidirectionalStream(
         options.sendGroup?.id ?? null,
         toSendOrder(options.sendOrder),
@@ -351,18 +364,15 @@ export class WebTransport {
   }
 
   /**
-   * @returns {ReadableStream} of WebTransportBidirectionalStream
-   *
    * Stored from the constructor, as the spec's getter requires, so reading it
    * before the handshake completes returns a stream that simply has nothing
    * in it yet.
    */
-  get incomingBidirectionalStreams() {
+  get incomingBidirectionalStreams(): ReadableStream<WebTransportBidirectionalStream> {
     return this.#incomingBidi;
   }
 
-  /** @returns {ReadableStream} of WebTransportReceiveStream */
-  get incomingUnidirectionalStreams() {
+  get incomingUnidirectionalStreams(): ReadableStream<WebTransportReceiveStream> {
     return this.#incomingUni;
   }
 
@@ -373,41 +383,38 @@ export class WebTransport {
    * only in the "closed" and "failed" states, so a call made before `ready`
    * waits for the handshake rather than failing.
    */
-  #assertUsable() {
+  #assertUsable(): void {
     if (this.#state === "closed" || this.#state === "failed") {
       throw new DOMException("the session is closed", "InvalidStateError");
     }
   }
 
-  get protocol() {
+  get protocol(): string {
     return this.#protocol;
   }
 
-  get responseHeaders() {
+  get responseHeaders(): Headers | null {
     return this.#responseHeaders;
   }
 
-  get anticipatedConcurrentIncomingUnidirectionalStreams() {
+  get anticipatedConcurrentIncomingUnidirectionalStreams(): number | null {
     return this.#anticipatedIncomingUni;
   }
 
-  set anticipatedConcurrentIncomingUnidirectionalStreams(value) {
+  set anticipatedConcurrentIncomingUnidirectionalStreams(value: number | null) {
     this.#anticipatedIncomingUni = value;
   }
 
-  get anticipatedConcurrentIncomingBidirectionalStreams() {
+  get anticipatedConcurrentIncomingBidirectionalStreams(): number | null {
     return this.#anticipatedIncomingBidi;
   }
 
-  set anticipatedConcurrentIncomingBidirectionalStreams(value) {
+  set anticipatedConcurrentIncomingBidirectionalStreams(value: number | null) {
     this.#anticipatedIncomingBidi = value;
   }
 
-  /**
-   * Terminates the session.
-   * @param {{closeCode?: number, reason?: string}} [closeInfo]
-   */
-  close(closeInfo = {}) {
+  /** Terminates the session. */
+  close(closeInfo: WebTransportCloseInfo = {}): void {
     if (this.#state === "closed" || this.#state === "failed") return;
     const closeCode = closeInfo.closeCode ?? 0;
     const reason = closeInfo.reason ?? "";
@@ -417,17 +424,14 @@ export class WebTransport {
     this.#resolveClosed({ closeCode, reason });
   }
 
-
   /**
    * Bytes queued for sending but not yet taken by the transport.
    *
    * Not in the spec. An application that broadcasts to many peers needs to know
    * when one has stopped keeping up, so it can shed load for that peer rather
    * than buffer without bound. Cheap to sample: callers poll it per frame.
-   *
-   * @returns {bigint}
    */
-  get queuedBytes() {
+  get queuedBytes(): bigint {
     return this.#native?.queuedBytes ?? 0n;
   }
 
@@ -435,15 +439,12 @@ export class WebTransport {
    * Inbound datagrams dropped because the receive queue was full.
    *
    * Not in the spec; the overload counterpart of {@link queuedBytes}.
-   *
-   * @returns {bigint}
    */
-  get datagramsDropped() {
+  get datagramsDropped(): bigint {
     return this.#native?.datagramsDropped ?? 0n;
   }
 
-  /** @returns {WebTransportSendGroup} */
-  createSendGroup() {
+  createSendGroup(): WebTransportSendGroup {
     // A group only means anything as a claimant on a live connection's
     // bandwidth, so a closed or failed session has none to hand out.
     if (this.#state === "closed" || this.#state === "failed") {
@@ -458,13 +459,12 @@ export class WebTransport {
    * Not a raw RFC 5705 export: the session id is folded into the exporter
    * context, so two sessions sharing a connection derive different bytes from
    * the same label and context.
-   *
-   * @param {BufferSource} label
-   * @param {BufferSource} context
-   * @param {number} outputLength
-   * @returns {Promise<Uint8Array>}
    */
-  async exportKeyingMaterial(label, context, outputLength) {
+  async exportKeyingMaterial(
+    label: BufferChunk,
+    context: BufferChunk,
+    outputLength: number,
+  ): Promise<Uint8Array> {
     // All three are required by the IDL, so a missing one is a TypeError
     // rather than whatever the addon makes of an undefined argument.
     if (arguments.length < 3) {
@@ -507,10 +507,10 @@ export class WebTransport {
    * Members this transport cannot source are absent rather than zero:
    * `rttVariation` (quinn tracks no RTT variance) and `estimatedSendRate`
    * (quinn exposes no estimate). Reporting a zero would read as a measurement.
-   *
-   * @returns {Promise<object>}
+   * Once the session has ended there is no connection to measure, and the
+   * dictionary is empty.
    */
-  async getStats() {
+  async getStats(): Promise<Partial<WebTransportConnectionStats>> {
     // Called before the handshake finishes, this waits for it rather than
     // reporting an empty dictionary: there are no statistics until there is a
     // connection. A handshake that fails rejects the wait, which surfaces as
@@ -523,7 +523,9 @@ export class WebTransport {
         throw new DOMException("the session failed", "InvalidStateError");
       }
     }
-    if (this.#state === "failed") {
+    // Read through a function: the await above can change the state, which
+    // TypeScript's narrowing from the check before it does not account for.
+    if (this.#currentState() === "failed") {
       throw new DOMException("the session failed", "InvalidStateError");
     }
     const stats = this.#native?.getStats();
@@ -559,16 +561,17 @@ export class WebTransport {
     };
   }
 
-  static get supportsReliableOnly() {
+  #currentState(): SessionState {
+    return this.#state;
+  }
+
+  static get supportsReliableOnly(): boolean {
     return true;
   }
 }
 
-/**
- * Validates a WebTransport URL, throwing what the constructor steps require.
- * @param {string} url
- */
-function parseUrl(url) {
+/** Validates a WebTransport URL, throwing what the constructor steps require. */
+function parseUrl(url: string): URL {
   let parsed;
   try {
     parsed = new URL(url);
@@ -584,8 +587,7 @@ function parseUrl(url) {
   return parsed;
 }
 
-/** @param {unknown} headers */
-function normaliseHeaders(headers) {
+function normaliseHeaders(headers: HeadersInit | undefined): { name: string; value: string }[] {
   if (!headers) return [];
   if (headers instanceof Headers) {
     return [...headers].map(([name, value]) => ({ name, value }));
@@ -599,8 +601,7 @@ function normaliseHeaders(headers) {
   }));
 }
 
-/** @param {unknown} source */
-function toBytes(source) {
+function toBytes(source: unknown): Uint8Array {
   if (source instanceof Uint8Array) return source;
   if (ArrayBuffer.isView(source)) {
     return new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
@@ -619,7 +620,10 @@ function toBytes(source) {
 }
 
 /** A send group must belong to the transport it is used with. */
-function validateSendGroup(sendGroup, transport) {
+function validateSendGroup(
+  sendGroup: WebTransportSendGroup | null | undefined,
+  transport: WebTransport,
+): void {
   if (sendGroup != null && sendGroup.transport !== transport) {
     throw new TypeError("the sendGroup belongs to a different WebTransport");
   }
@@ -632,7 +636,7 @@ function validateSendGroup(sendGroup, transport) {
  * as a BigInt so the spec's full 64-bit range survives: a JS number cannot
  * represent it, and truncating would silently reorder streams.
  */
-function toSendOrder(sendOrder) {
+function toSendOrder(sendOrder: number | bigint | null | undefined): bigint | null {
   if (sendOrder === undefined || sendOrder === null) return null;
   return BigInt(sendOrder);
 }
@@ -646,5 +650,7 @@ export {
   WebTransportSendStream,
   WebTransportWriter,
 };
-export { serve } from "./server.js";
-export { generateSelfSigned, generateCaSigned, signWithCa } from "./cert.js";
+export { serve, WebTransportServerSession, WebTransportSessionRequest } from "./server.ts";
+export type { ServeOptions, WebTransportServer } from "./server.ts";
+export { generateSelfSigned, generateCaSigned, signWithCa } from "./cert.ts";
+export type { SelfSignedCertificate, CaSignedCertificate } from "./cert.ts";

@@ -6,13 +6,21 @@
  * which is how a session is trusted without a CA.
  */
 
-import { native } from "./native.js";
+import { native } from "./native.ts";
 
-/**
- * @param {string[]} [hostnames] defaults to ["localhost"]
- * @returns {{ cert: string, key: string, hash: Uint8Array }}
- */
-export function generateSelfSigned(hostnames = ["localhost"]) {
+export interface SelfSignedCertificate {
+  cert: string;
+  key: string;
+  hash: Uint8Array;
+}
+
+export interface CaSignedCertificate extends SelfSignedCertificate {
+  caCert: string;
+  caKey: string;
+}
+
+/** @param hostnames populates the SAN; defaults to ["localhost"] */
+export function generateSelfSigned(hostnames: string[] = ["localhost"]): SelfSignedCertificate {
   return native.generateSelfSigned(hostnames);
 }
 
@@ -28,10 +36,9 @@ export function generateSelfSigned(hostnames = ["localhost"]) {
  * Serve `cert` alone. Browsers chain it to the root they now trust, and
  * Chromium rejects a QUIC chain that carries its own root in-band.
  *
- * @param {string[]} [hostnames] every name and IP the server answers to
- * @returns {{ cert: string, key: string, caCert: string, caKey: string, hash: Uint8Array }}
+ * @param hostnames every name and IP the server answers to
  */
-export function generateCaSigned(hostnames = ["localhost"]) {
+export function generateCaSigned(hostnames: string[] = ["localhost"]): CaSignedCertificate {
   return native.generateCaSigned(hostnames);
 }
 
@@ -40,12 +47,11 @@ export function generateCaSigned(hostnames = ["localhost"]) {
  *
  * Restarting the server must not mint a new root: a device that installed and
  * trusted the old one would have to repeat the whole dance.
- *
- * @param {string[]} hostnames
- * @param {string} caKeyPem
- * @param {string} caCertPem
- * @returns {{ cert: string, key: string, caCert: string, caKey: string, hash: Uint8Array }}
  */
-export function signWithCa(hostnames, caKeyPem, caCertPem) {
+export function signWithCa(
+  hostnames: string[],
+  caKeyPem: string,
+  caCertPem: string,
+): CaSignedCertificate {
   return native.signWithCa(hostnames, caKeyPem, caCertPem);
 }

@@ -237,7 +237,7 @@ Exports: `WebTransport`, `WebTransportError`, `WebTransportSendGroup`,
 `WebTransportSendStream`, `WebTransportWriter`, `serve`, `generateSelfSigned`,
 `generateCaSigned`, `signWithCa`.
 
-Full type declarations are in [`js/index.d.ts`](js/index.d.ts). Runnable
+Full type declarations are in [`js/types.d.ts`](js/types.d.ts). Runnable
 examples are in [`examples/`](examples/).
 
 ## Development

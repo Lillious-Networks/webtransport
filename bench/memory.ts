@@ -7,7 +7,7 @@
  *   bun bench/memory.ts
  */
 
-import { WebTransport, generateSelfSigned, serve } from "../js/index.js";
+import { WebTransport, generateSelfSigned, serve } from "../js/index.ts";
 
 const { cert, key, hash } = generateSelfSigned(["localhost"]);
 

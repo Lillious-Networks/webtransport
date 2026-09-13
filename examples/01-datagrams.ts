@@ -4,7 +4,7 @@
  *   bun examples/01-datagrams.ts
  */
 
-import { WebTransport, generateSelfSigned, serve } from "../js/index.js";
+import { WebTransport, generateSelfSigned, serve } from "../js/index.ts";
 
 // WebTransport requires TLS even locally. The client trusts this certificate by
 // its hash, which is what serverCertificateHashes is for.

@@ -7,7 +7,7 @@
  * relayed to all K members (including the sender), which multiplies the
  * server's send load by K, the shape of a multiplayer movement server.
  */
-import { generateSelfSigned, serve } from "../js/index.js";
+import { generateSelfSigned, serve } from "../js/index.ts";
 
 const DURATION_S = Number(process.argv[2] ?? 30);
 const relayArg = process.argv.indexOf("--relay");

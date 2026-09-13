@@ -7,7 +7,7 @@
  * server can serve every handler the tests ask for.
  */
 
-import type { WebTransportServerSession, WebTransportSessionRequest } from "../js/index.d.ts";
+import type { WebTransportServerSession, WebTransportSessionRequest } from "../js/types.d.ts";
 
 export type Handler = (
   session: WebTransportServerSession,

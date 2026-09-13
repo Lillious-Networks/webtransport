@@ -9,7 +9,7 @@
  * bytes; sizes above 63 exercise the LEB128 batch framing that short test
  * vectors cannot.
  */
-import { WebTransport } from "../js/index.js";
+import { WebTransport } from "../js/index.ts";
 
 const port = Number(process.argv[2] ?? 0);
 const hashHex = process.argv[3] ?? "";

@@ -34,7 +34,7 @@
  * Then open on mobile: https://<machine-ip>:<port>/
  * Page reports directly to this process and to the browser.
  */
-import { generateCaSigned, serve, signWithCa } from "../js/index.js";
+import { generateCaSigned, serve, signWithCa } from "../js/index.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { networkInterfaces, homedir } from "os";
 import { randomUUID } from "crypto";

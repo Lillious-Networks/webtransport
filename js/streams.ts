@@ -7,50 +7,60 @@
  * real rather than advisory.
  */
 
-import { markHandled, toWebTransportError } from "./errors.js";
+import { markHandled, toWebTransportError } from "./errors.ts";
+import type { NativeBidiStream, NativeRecvStream, NativeSendStream } from "./native.ts";
+import type { WebTransport, WebTransportSendGroup } from "./index.ts";
+import type { WebTransportReceiveStreamStats, WebTransportSendStreamStats } from "./types.d.ts";
+
+/** A chunk a caller may write: any BufferSource. */
+export type BufferChunk = ArrayBufferView | ArrayBuffer;
+
+/** Placement of an outgoing stream in the send scheduler. */
+export interface SendStreamOptions {
+  sendGroup?: WebTransportSendGroup | null;
+  sendOrder?: number | bigint;
+  /** The transport the stream belongs to, which bounds its send groups. */
+  transport?: WebTransport | null;
+}
 
 /**
  * A ReadableStream of Uint8Array over an incoming WebTransport stream.
  */
-export class WebTransportReceiveStream extends ReadableStream {
-  #native;
+export class WebTransportReceiveStream extends ReadableStream<Uint8Array> {
+  #native: NativeRecvStream;
 
-  /** @param {object} native the addon receive-stream handle */
-  constructor(native) {
+  constructor(native: NativeRecvStream) {
     super(
       {
         // A byte stream so consumers may use a BYOB reader, as the spec
         // requires of WebTransportReceiveStream.
         type: "bytes",
         pull: async (controller) => {
+          const bytes = controller as ReadableByteStreamController;
           try {
             // With a BYOB request, read exactly what the consumer has room
             // for; otherwise take whatever is available.
-            const request = controller.byobRequest;
-            const max = request ? request.view.byteLength : undefined;
-            const chunk = await native.read(max);
+            const request = bytes.byobRequest;
+            const view = request?.view ?? null;
+            const chunk = await native.read(view ? view.byteLength : undefined);
 
             if (chunk === null || chunk === undefined) {
               // End of stream. The controller is closed first: responding with
               // zero bytes is only legal on an already-closed stream, and the
               // close is what resolves the pending BYOB read as done.
-              controller.close();
+              bytes.close();
               request?.respond(0);
               return;
             }
 
-            if (request) {
-              new Uint8Array(
-                request.view.buffer,
-                request.view.byteOffset,
-                request.view.byteLength,
-              ).set(chunk);
+            if (request && view) {
+              new Uint8Array(view.buffer, view.byteOffset, view.byteLength).set(chunk);
               request.respond(chunk.byteLength);
             } else {
-              controller.enqueue(chunk);
+              bytes.enqueue(chunk as Uint8Array<ArrayBuffer>);
             }
           } catch (err) {
-            controller.error(toWebTransportError(err, "stream"));
+            bytes.error(toWebTransportError(err, "stream"));
           }
         },
         cancel: async (reason) => {
@@ -65,8 +75,7 @@ export class WebTransportReceiveStream extends ReadableStream {
     this.#native = native;
   }
 
-  /** @returns {Promise<{bytesReceived: bigint, bytesRead: bigint}>} */
-  async getStats() {
+  async getStats(): Promise<WebTransportReceiveStreamStats> {
     const read = this.#native.bytesRead;
     // bytesReceived counts what arrived; without per-stream transport
     // accounting the best truthful answer is what we have actually read.
@@ -77,18 +86,14 @@ export class WebTransportReceiveStream extends ReadableStream {
 /**
  * A WritableStream over an outgoing WebTransport stream.
  */
-export class WebTransportSendStream extends WritableStream {
-  #native;
-  #sendGroup;
-  #sendOrder;
+export class WebTransportSendStream extends WritableStream<BufferChunk> {
+  #native: NativeSendStream;
+  #sendGroup: WebTransportSendGroup | null;
+  #sendOrder: bigint;
   /** The transport this stream belongs to, which bounds its send groups. */
-  #transport;
+  #transport: WebTransport | null;
 
-  /**
-   * @param {object} native the addon send-stream handle
-   * @param {{ sendGroup?: object | null, sendOrder?: number | bigint, transport?: object }} [options]
-   */
-  constructor(native, options = {}) {
+  constructor(native: NativeSendStream, options: SendStreamOptions = {}) {
     super({
       write: async (chunk) => {
         // Converted before the try: a chunk of the wrong type is a caller
@@ -121,15 +126,15 @@ export class WebTransportSendStream extends WritableStream {
   }
 
   /** @internal the addon handle, for atomicWrite */
-  get native() {
+  get native(): NativeSendStream {
     return this.#native;
   }
 
-  get sendGroup() {
+  get sendGroup(): WebTransportSendGroup | null {
     return this.#sendGroup;
   }
 
-  set sendGroup(value) {
+  set sendGroup(value: WebTransportSendGroup | null) {
     // A group schedules against one connection's bandwidth, so it cannot
     // take a stream from another transport. The spec throws here rather than
     // rejecting, since the setter returns nothing.
@@ -152,24 +157,22 @@ export class WebTransportSendStream extends WritableStream {
    * the full 64-bit value, and only the read-back loses precision beyond
    * 2**53, exactly as it would in a browser.
    */
-  get sendOrder() {
+  get sendOrder(): number {
     return Number(this.#sendOrder);
   }
 
-  set sendOrder(value) {
+  set sendOrder(value: number | bigint) {
     this.#sendOrder = toSendOrderValue(value);
     // Passed as a BigInt so the full 64-bit range reaches the scheduler; a JS
     // number could not carry it, and truncating would reorder streams.
     this.#native.setSendOrder(this.#sendOrder);
   }
 
-  /** @returns {WebTransportWriter} */
-  getWriter() {
+  override getWriter(): WebTransportWriter {
     return new WebTransportWriter(this);
   }
 
-  /** @returns {Promise<{bytesWritten: bigint, bytesSent: bigint, bytesAcknowledged: bigint}>} */
-  async getStats() {
+  async getStats(): Promise<WebTransportSendStreamStats> {
     const written = this.#native.bytesWritten;
     // bytesAcknowledged needs per-stream ack accounting the transport does not
     // expose; reporting what we know beats inventing a number.
@@ -180,12 +183,11 @@ export class WebTransportSendStream extends WritableStream {
 /**
  * A WritableStreamDefaultWriter with the two extra methods the spec adds.
  */
-export class WebTransportWriter extends WritableStreamDefaultWriter {
-  #stream;
-  #pendingAtomic = [];
+export class WebTransportWriter extends WritableStreamDefaultWriter<BufferChunk> {
+  #stream: WebTransportSendStream;
+  #pendingAtomic: Uint8Array[] = [];
 
-  /** @param {WebTransportSendStream} stream */
-  constructor(stream) {
+  constructor(stream: WebTransportSendStream) {
     super(stream);
     this.#stream = stream;
     // An aborted or peer-closed writer rejects `closed`, which is an ordinary
@@ -199,11 +201,8 @@ export class WebTransportWriter extends WritableStreamDefaultWriter {
    *
    * Rejects rather than blocking when it does not, which is the point: it lets
    * transactional callers avoid a flow-control deadlock (RFC 9308 §4.4).
-   *
-   * @param {BufferSource} [chunk]
-   * @returns {Promise<undefined>}
    */
-  async atomicWrite(chunk) {
+  async atomicWrite(chunk?: BufferChunk): Promise<undefined> {
     if (chunk === undefined) return;
     const bytes = toBytes(chunk);
     try {
@@ -226,7 +225,7 @@ export class WebTransportWriter extends WritableStreamDefaultWriter {
    * Writes reach the transport as they are made, so there is nothing held back
    * to flush; the method exists so callers can use the spec's shape.
    */
-  commit() {
+  commit(): void {
     this.#pendingAtomic = [];
   }
 }
@@ -235,25 +234,19 @@ export class WebTransportWriter extends WritableStreamDefaultWriter {
  * A bidirectional stream: a readable and a writable half.
  */
 export class WebTransportBidirectionalStream {
-  #readable;
-  #writable;
+  #readable: WebTransportReceiveStream;
+  #writable: WebTransportSendStream;
 
-  /**
-   * @param {object} native the addon bidi-stream handle
-   * @param {{ sendGroup?: object | null, sendOrder?: number | bigint }} [options]
-   */
-  constructor(native, options = {}) {
+  constructor(native: NativeBidiStream, options: SendStreamOptions = {}) {
     this.#readable = new WebTransportReceiveStream(native.readable);
     this.#writable = new WebTransportSendStream(native.writable, options);
   }
 
-  /** @returns {WebTransportReceiveStream} */
-  get readable() {
+  get readable(): WebTransportReceiveStream {
     return this.#readable;
   }
 
-  /** @returns {WebTransportSendStream} */
-  get writable() {
+  get writable(): WebTransportSendStream {
     return this.#writable;
   }
 }
@@ -264,7 +257,7 @@ export class WebTransportBidirectionalStream {
  * A WebTransportError carries its own code; anything else has none, and the
  * spec's default of 0 applies.
  */
-function errorCodeFrom(reason) {
+function errorCodeFrom(reason: unknown): number {
   if (reason && typeof reason === "object" && "streamErrorCode" in reason) {
     const code = reason.streamErrorCode;
     if (typeof code === "number") return code >>> 0;
@@ -273,25 +266,22 @@ function errorCodeFrom(reason) {
   return 0;
 }
 
-/** @param {unknown} chunk */
 /**
  * Coerces a `sendOrder` the way WebIDL coerces a `long long`.
  *
  * `BigInt(value)` is close but not the same: WebIDL runs ToNumber first, so
  * `null` becomes 0 and a fractional number truncates, where `BigInt` throws
  * for both.
- *
- * @param {unknown} value
- * @returns {bigint}
  */
-export function toSendOrderValue(value) {
+export function toSendOrderValue(value: unknown): bigint {
   if (typeof value === "bigint") return value;
   const asNumber = Number(value);
   if (!Number.isFinite(asNumber)) return 0n;
   return BigInt(Math.trunc(asNumber));
 }
 
-function toBytes(chunk) {
+/** Normalises a chunk to the bytes to send. */
+function toBytes(chunk: unknown): Uint8Array {
   if (chunk instanceof Uint8Array) return chunk;
   if (ArrayBuffer.isView(chunk)) {
     return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);

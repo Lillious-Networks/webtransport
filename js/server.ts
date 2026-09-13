@@ -6,30 +6,36 @@
  * session object behaves the same on both sides.
  */
 
-import { native } from "./native.js";
-import { toWebTransportError } from "./errors.js";
-import { WebTransportDatagramDuplexStream } from "./datagrams.js";
+import { native } from "./native.ts";
+import type { NativeIncomingSession, NativeSession } from "./native.ts";
+import { toWebTransportError } from "./errors.ts";
+import { WebTransportDatagramDuplexStream } from "./datagrams.ts";
 import {
   WebTransportBidirectionalStream,
   WebTransportReceiveStream,
   WebTransportSendStream,
-} from "./streams.js";
-import { makeIncomingStreams } from "./incoming.js";
+} from "./streams.ts";
+import { makeIncomingStreams } from "./incoming.ts";
+import type { CreateStreamOptions } from "./index.ts";
+import type {
+  WebTransportCloseInfo,
+  WebTransportConnectionStats,
+  WebTransportReliabilityMode,
+} from "./types.d.ts";
 
 /**
  * A session as seen by the server. Same shape as a client `WebTransport`.
  */
 export class WebTransportServerSession {
-  #native;
-  #datagrams;
-  #closed;
-  #resolveClosed;
-  #state = "connected";
-  #incomingBidi;
-  #incomingUni;
+  #native: NativeSession;
+  #datagrams: WebTransportDatagramDuplexStream;
+  #closed: Promise<WebTransportCloseInfo>;
+  #resolveClosed!: (info: WebTransportCloseInfo) => void;
+  #state: "connected" | "draining" | "closed" = "connected";
+  #incomingBidi: ReadableStream<WebTransportBidirectionalStream>;
+  #incomingUni: ReadableStream<WebTransportReceiveStream>;
 
-  /** @param {object} nativeSession */
-  constructor(nativeSession) {
+  constructor(nativeSession: NativeSession) {
     this.#native = nativeSession;
     this.#datagrams = new WebTransportDatagramDuplexStream(nativeSession);
     this.#incomingBidi = makeIncomingStreams(
@@ -57,20 +63,21 @@ export class WebTransportServerSession {
     );
   }
 
-  get datagrams() {
+  get datagrams(): WebTransportDatagramDuplexStream {
     return this.#datagrams;
   }
 
-  get closed() {
+  get closed(): Promise<WebTransportCloseInfo> {
     return this.#closed;
   }
 
-  get reliability() {
-    return this.#native.reliability;
+  get reliability(): WebTransportReliabilityMode {
+    // The addon reports one of the three IDL values as a plain string.
+    return this.#native.reliability as WebTransportReliabilityMode;
   }
 
   /** The CONNECT stream id identifying this session on its connection. */
-  get id() {
+  get id(): bigint {
     return this.#native.id;
   }
 
@@ -79,10 +86,8 @@ export class WebTransportServerSession {
    *
    * Not in the spec; a server broadcasting to many clients uses it to shed
    * load for one that has stopped reading. See the client-side note.
-   *
-   * @returns {bigint}
    */
-  get queuedBytes() {
+  get queuedBytes(): bigint {
     return this.#native.queuedBytes;
   }
 
@@ -90,9 +95,9 @@ export class WebTransportServerSession {
    * Inbound datagrams dropped because the receive queue was full.
    *
    * Not in the spec; together with {@link queuedBytes} this is the overload
-   * signal an operator watches. @returns {bigint}
+   * signal an operator watches.
    */
-  get datagramsDropped() {
+  get datagramsDropped(): bigint {
     return this.#native.datagramsDropped;
   }
 
@@ -100,27 +105,23 @@ export class WebTransportServerSession {
    * UDP datagrams the transport has received on this session's connection.
    *
    * Not in the spec; the transport-level counterpart of {@link datagramsDropped}.
-   * @returns {bigint}
    */
-  get udpPacketsReceived() {
+  get udpPacketsReceived(): bigint {
     return this.#native.udpPacketsReceived;
   }
 
-  /** @returns {ReadableStream} of WebTransportBidirectionalStream */
-  get incomingBidirectionalStreams() {
+  get incomingBidirectionalStreams(): ReadableStream<WebTransportBidirectionalStream> {
     return this.#incomingBidi;
   }
 
-  /** @returns {ReadableStream} of WebTransportReceiveStream */
-  get incomingUnidirectionalStreams() {
+  get incomingUnidirectionalStreams(): ReadableStream<WebTransportReceiveStream> {
     return this.#incomingUni;
   }
 
-  /**
-   * Opens a bidirectional stream to the client.
-   * @returns {Promise<WebTransportBidirectionalStream>}
-   */
-  async createBidirectionalStream(options = {}) {
+  /** Opens a bidirectional stream to the client. */
+  async createBidirectionalStream(
+    options: CreateStreamOptions = {},
+  ): Promise<WebTransportBidirectionalStream> {
     const native = await this.#native.createBidirectionalStream(
       options.sendGroup?.id ?? null,
       options.sendOrder === undefined || options.sendOrder === null
@@ -131,11 +132,10 @@ export class WebTransportServerSession {
     return new WebTransportBidirectionalStream(native, options);
   }
 
-  /**
-   * Opens a unidirectional stream to the client.
-   * @returns {Promise<WebTransportSendStream>}
-   */
-  async createUnidirectionalStream(options = {}) {
+  /** Opens a unidirectional stream to the client. */
+  async createUnidirectionalStream(
+    options: CreateStreamOptions = {},
+  ): Promise<WebTransportSendStream> {
     const native = await this.#native.createUnidirectionalStream(
       options.sendGroup?.id ?? null,
       options.sendOrder === undefined || options.sendOrder === null
@@ -146,11 +146,11 @@ export class WebTransportServerSession {
     return new WebTransportSendStream(native, options);
   }
 
-  get state() {
+  get state(): string {
     return this.#state;
   }
 
-  close(closeInfo = {}) {
+  close(closeInfo: WebTransportCloseInfo = {}): void {
     if (this.#state === "closed") return;
     const closeCode = closeInfo.closeCode ?? 0;
     const reason = closeInfo.reason ?? "";
@@ -164,7 +164,7 @@ export class WebTransportServerSession {
    * ones already open finish, which is how a server sheds sessions before
    * shutting down without cutting work short.
    */
-  drain() {
+  drain(): void {
     if (this.#state !== "connected") return;
     this.#native.drain();
     this.#state = "draining";
@@ -176,7 +176,7 @@ export class WebTransportServerSession {
    * Members the transport cannot source are omitted rather than reported as
    * zero, so a caller can tell "nothing sent" apart from "not measured".
    */
-  async getStats() {
+  async getStats(): Promise<Partial<WebTransportConnectionStats>> {
     const stats = this.#native.getStats();
     if (!stats) return {};
     return {
@@ -205,41 +205,59 @@ export class WebTransportServerSession {
  * The request that opened a session, for routing and authorization.
  */
 export class WebTransportSessionRequest {
-  #incoming;
-  #headers;
+  #incoming: NativeIncomingSession;
+  #headers: Headers;
 
-  /** @param {object} incoming */
-  constructor(incoming) {
+  constructor(incoming: NativeIncomingSession) {
     this.#incoming = incoming;
     this.#headers = new Headers(
-      incoming.headers.map(({ name, value }) => [name, value]),
+      incoming.headers.map(({ name, value }): [string, string] => [name, value]),
     );
   }
 
-  get path() {
+  get path(): string {
     return this.#incoming.path;
   }
 
-  get authority() {
+  get authority(): string {
     return this.#incoming.authority;
   }
 
-  /** @returns {Headers} */
-  get headers() {
+  get headers(): Headers {
     return this.#headers;
   }
 
   /** Subprotocols the client offered, in preference order. */
-  get protocols() {
+  get protocols(): string[] {
     return this.#incoming.protocols;
   }
+}
+
+export interface ServeOptions {
+  port: number;
+  hostname?: string;
+  /** PEM certificate chain. */
+  cert: string;
+  /** PEM private key. */
+  key: string;
+  maxSessions?: number;
+  maxConcurrentStreams?: number;
+  /** Returning accepts the session; throwing rejects it. */
+  session: (session: WebTransportServerSession, request: WebTransportSessionRequest) => unknown;
+  error?: (err: unknown) => unknown;
+}
+
+export interface WebTransportServer {
+  readonly port: number;
+  /** Stops accepting, and resolves once both internal loops have finished. */
+  stop(): Promise<undefined>;
 }
 
 /**
  * Starts a WebTransport server.
  *
- * ```js
- * const server = serve({
+ * ```ts
+ * const server = await serve({
  *   port: 4433,
  *   cert, key,
  *   session(session, request) { ... },
@@ -247,18 +265,8 @@ export class WebTransportSessionRequest {
  * ```
  *
  * Returning normally from `session` accepts; throwing rejects the session.
- *
- * @param {{
- *   port: number,
- *   hostname?: string,
- *   cert: string,
- *   key: string,
- *   maxSessions?: number,
- *   session: (session: WebTransportServerSession, request: WebTransportSessionRequest) => unknown,
- *   error?: (err: unknown) => unknown,
- * }} options
  */
-export async function serve(options) {
+export async function serve(options: ServeOptions): Promise<WebTransportServer> {
   if (typeof options?.session !== "function") {
     throw new TypeError("serve() requires a session handler");
   }
@@ -278,7 +286,7 @@ export async function serve(options) {
   let stopped = false;
   const onError =
     options.error ??
-    ((err) => {
+    ((err: unknown) => {
       // Without a handler a failing session would be silent, which is worse
       // than a message on stderr.
       console.error("webtransport: unhandled session error:", err);
@@ -296,7 +304,7 @@ export async function serve(options) {
 
   const acceptLoop = (async () => {
     while (!stopped) {
-      let incoming;
+      let incoming: NativeIncomingSession | null | undefined;
       try {
         incoming = await server.accept();
       } catch (err) {
@@ -305,12 +313,13 @@ export async function serve(options) {
       }
       if (!incoming) return;
 
-      const request = new WebTransportSessionRequest(incoming);
+      const accepted = incoming;
+      const request = new WebTransportSessionRequest(accepted);
       // Each session is handled independently: one throwing must not stop the
       // server from accepting others.
       (async () => {
         try {
-          const nativeSession = incoming.accept();
+          const nativeSession = accepted.accept();
           const session = new WebTransportServerSession(nativeSession);
           await options.session(session, request);
         } catch (err) {
@@ -320,7 +329,7 @@ export async function serve(options) {
     }
   })();
 
-  const handle = {
+  return {
     get port() {
       return server.port;
     },
@@ -341,6 +350,4 @@ export async function serve(options) {
       return Promise.all([acceptLoop, errorLoop]).then(() => undefined);
     },
   };
-
-  return handle;
 }

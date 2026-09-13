@@ -4,7 +4,7 @@
  *   bun bench/stress-datagrams.ts            # app-style sends (writer.write)
  *   bun bench/stress-datagrams.ts --batch    # fast path (sendSyncBatch), finds the server ceiling
  */
-import { WebTransport, generateSelfSigned, serve } from "../js/index.js";
+import { WebTransport, generateSelfSigned, serve } from "../js/index.ts";
 
 const DURATION_MS = 10000;
 const { cert, key, hash } = generateSelfSigned(["localhost"]);

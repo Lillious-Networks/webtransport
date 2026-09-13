@@ -4,7 +4,7 @@
  *   bun examples/03-spec-surface.ts
  */
 
-import { WebTransport, generateSelfSigned, serve } from "../js/index.js";
+import { WebTransport, generateSelfSigned, serve } from "../js/index.ts";
 
 const { cert, key, hash } = generateSelfSigned(["localhost"]);
 
@@ -67,11 +67,12 @@ const material = await wt.exportKeyingMaterial(
 console.log(`client: derived ${material.byteLength} bytes of keying material`);
 
 // Stats report what the transport can actually source; members it cannot are
-// absent rather than reported as zero.
+// absent rather than reported as zero, and the dictionary is empty once the
+// session has ended.
 const stats = await wt.getStats();
 console.log(
   `client: sent ${stats.bytesSent} bytes in ${stats.packetsSent} packets, ` +
-    `rtt ${stats.smoothedRtt.toFixed(2)}ms`,
+    `rtt ${stats.smoothedRtt?.toFixed(2) ?? "n/a"}ms`,
 );
 console.log(`client: rttVariation present? ${"rttVariation" in stats}`);
 

@@ -30,7 +30,7 @@ import {
   WebTransportSendGroup,
   WebTransportDatagramsWritable,
   WebTransportDatagramDuplexStream,
-} from "../js/index.js";
+} from "../js/index.ts";
 import { handlers, unsupportedHandlers } from "./handlers.ts";
 import * as harness from "./harness.ts";
 import { TestCase, OptionalFeatureUnsupported, takeTests } from "./harness.ts";
